@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; img-src 'self' data: file:; worker-src 'self' data: blob: file:;" />
+<title>Nexo Dev</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Title / toolbar -->
+  <div id="titlebar">
+    <div id="titlebar-left">
+      <span id="brand"><img class="brand-logo" src="icons/logo-48.png" alt="" /><span class="brand-nexo">NEXO</span><span class="brand-dev">DEV</span></span>
+      <span id="project-name"></span>
+    </div>
+    <div id="titlebar-right">
+      <button class="tbtn" id="btn-open-folder" title="Open Folder (Ctrl+O)">Open Folder</button>
+      <button class="tbtn" id="btn-new-file" title="New File (Ctrl+N)">New File</button>
+      <button class="tbtn" id="btn-toggle-terminal" title="Toggle Terminal (Ctrl+`)">Terminal</button>
+      <button class="tbtn icon-only" id="btn-toggle-split" title="Split Editor (Ctrl+\)">⊞</button>
+      <div id="theme-picker-wrap">
+        <button class="tbtn icon-only" id="btn-theme-toggle" title="Change theme">🌙</button>
+        <div id="theme-dropdown" class="hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- Activity rail -->
+    <div id="activitybar">
+      <button class="rail-btn active" id="rail-explorer" data-view="explorer" title="Explorer">
+        <span class="rail-icon">📁</span><span class="rail-label">Files</span>
+      </button>
+      <button class="rail-btn" id="rail-search" data-view="search" title="Search (Ctrl+Shift+F)">
+        <span class="rail-icon">🔎</span><span class="rail-label">Search</span>
+      </button>
+      <button class="rail-btn" id="rail-git" data-view="git" title="Source Control (Ctrl+Shift+G)">
+        <span class="rail-icon">🌿</span><span class="rail-label">Git</span><span class="rail-badge hidden" id="rail-git-badge">0</span>
+      </button>
+      <button class="rail-btn" id="rail-sites" data-view="sites" title="Sites Monitor &amp; SEO">
+        <span class="rail-icon">🌐</span><span class="rail-label">Sites</span>
+      </button>
+      <button class="rail-btn rail-btn-bottom" id="rail-settings" data-view="settings" title="Settings">
+        <span class="rail-icon">⚙️</span><span class="rail-label">Settings</span>
+      </button>
+    </div>
+
+    <!-- ===================== Explorer workspace ===================== -->
+    <div id="workspace-explorer" class="workspace active">
+      <div id="sidebar">
+        <!-- Explorer panel -->
+        <div id="panel-explorer" class="sidebar-panel active">
+          <div class="panel-header">
+            <span id="sidebar-root-name">EXPLORER</span>
+            <div id="sidebar-actions">
+              <button class="icon-btn" id="btn-add-file" title="New File">＋file</button>
+              <button class="icon-btn" id="btn-add-folder" title="New Folder">＋dir</button>
+            </div>
+          </div>
+          <div id="file-tree"></div>
+        </div>
+
+        <!-- Search panel -->
+        <div id="panel-search" class="sidebar-panel">
+          <div class="panel-header"><span>SEARCH</span></div>
+          <div id="search-box">
+            <input id="search-input" type="text" placeholder="Search in project…" spellcheck="false" autocomplete="off" />
+            <label id="search-case-toggle"><input type="checkbox" id="search-case" /> Case sensitive</label>
+          </div>
+          <div id="search-summary" class="muted"></div>
+          <div id="search-results"></div>
+        </div>
+
+        <!-- Git / Source Control panel -->
+        <div id="panel-git" class="sidebar-panel">
+          <div class="panel-header">
+            <span>SOURCE CONTROL</span>
+            <div id="git-actions"><button class="icon-btn" id="btn-git-refresh" title="Refresh">↻</button></div>
+          </div>
+          <div id="git-branch-row">
+            <div id="git-branch-info">
+              <span id="git-branch-current">🌿 …</span>
+              <span id="git-ahead-behind"></span>
+            </div>
+            <div id="git-branch-actions">
+              <button class="icon-btn" id="git-pull-btn" title="Pull from remote" disabled>⬇ Pull</button>
+              <button class="icon-btn" id="git-push-btn" title="Push to remote" disabled>⬆ Push</button>
+              <button class="icon-btn" id="git-branch-switch-btn">Switch</button>
+            </div>
+          </div>
+          <div id="git-subtabs">
+            <button class="git-subtab active" id="git-tab-changes" data-tab="changes">Changes</button>
+            <button class="git-subtab" id="git-tab-history" data-tab="history">History</button>
+          </div>
+          <div id="git-body"></div>
+        </div>
+      </div>
+
+      <div id="resizer"></div>
+
+      <div id="main">
+        <div id="tabbar"></div>
+        <div id="editor-area">
+          <div id="editor-pane-main">
+            <div id="welcome">
+              <div class="welcome-inner">
+                <img class="welcome-logo" src="icons/logo-96.png" alt="" />
+                <h1><span class="brand-nexo">NEXO</span><span class="brand-dev">DEV</span></h1>
+                <p class="tagline">A fast, focused editor for your projects.</p>
+
+                <div class="welcome-actions">
+                  <button class="welcome-btn primary" id="welcome-open">Open Folder</button>
+                  <button class="welcome-btn" id="welcome-new">New Project</button>
+                </div>
+
+                <div id="recent-section">
+                  <h2>Recent Projects</h2>
+                  <ul id="recent-list"></ul>
+                  <p id="recent-empty" class="muted">Nothing here yet — open a folder to get started.</p>
+                </div>
+              </div>
+            </div>
+            <div id="editor-container" style="display:none;"></div>
+            <button id="md-preview-btn" class="md-float-btn hidden" title="Show rendered preview">👁 Preview</button>
+            <div id="diff-container" style="display:none;"></div>
+            <div id="markdown-preview" style="display:none;">
+              <div class="md-toolbar">
+                <span>PREVIEW</span>
+                <button class="icon-btn" id="md-edit-btn">✏️ Edit</button>
+              </div>
+              <div id="markdown-preview-content" class="markdown-preview-content"></div>
+            </div>
+            <div id="conflict-banner">
+              <span id="conflict-count"></span>
+              <div class="conflict-actions">
+                <button class="conflict-btn" id="conflict-current" title="Keep your version, discard the incoming one">Accept Current</button>
+                <button class="conflict-btn" id="conflict-incoming" title="Keep the incoming version, discard yours">Accept Incoming</button>
+                <button class="conflict-btn" id="conflict-both" title="Keep both, one after the other">Accept Both</button>
+                <button class="conflict-btn ghost" id="conflict-next" title="Jump to the next conflict without resolving">Next ▾</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="split-resizer"></div>
+
+          <div id="editor-pane-split">
+            <div id="split-header">
+              <select id="split-tab-select" title="Choose which open file shows here"></select>
+              <button class="icon-btn" id="split-md-toggle-btn" title="Toggle markdown preview">👁 Preview</button>
+              <button class="icon-btn" id="split-close-btn" title="Close split view">✕</button>
+            </div>
+            <div id="split-body">
+              <div id="editor-container-split"></div>
+              <div id="split-markdown-preview">
+                <div id="split-markdown-preview-content" class="markdown-preview-content"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="terminal-panel">
+          <div id="terminal-resizer" title="Drag to resize"></div>
+          <div id="terminal-header">
+            <span>TERMINAL <span id="terminal-cwd" class="muted"></span></span>
+            <div class="term-actions">
+              <button class="icon-btn" id="term-clear" title="Clear output">Clear</button>
+              <button class="icon-btn" id="term-close" title="Close terminal">✕</button>
+            </div>
+          </div>
+          <div id="terminal-output"></div>
+          <div id="terminal-input-row">
+            <span class="term-prompt">&gt;</span>
+            <input id="terminal-input" type="text" placeholder="Run a command in this project… (e.g. npm install)" autocomplete="off" spellcheck="false" />
+            <button class="tbtn" id="term-run-btn">Run</button>
+          </div>
+        </div>
+
+        <div id="statusbar">
+          <span id="status-path">No file open</span>
+          <span id="status-right">
+            <span id="status-lang"></span>
+            <span id="status-pos"></span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== Sites workspace (monitoring + SEO) ===================== -->
+    <div id="workspace-sites" class="workspace">
+      <div id="sites-sidebar">
+        <div class="sidebar-header-static">
+          <span>MONITORED SITES</span>
+          <div class="sidebar-actions-static">
+            <button class="icon-btn" id="btn-add-site" title="Add Site">＋ site</button>
+          </div>
+        </div>
+        <div id="sites-list"></div>
+        <div id="sites-list-empty" class="muted" style="padding:14px;">No sites yet. Add one to start monitoring uptime and running SEO audits.</div>
+      </div>
+      <div id="sites-main">
+        <div id="sites-welcome">
+          <div class="welcome-inner">
+            <h1><span class="brand-nexo">Site</span><span class="brand-dev">Monitor</span></h1>
+            <p class="tagline">Track uptime and run SEO audits on any website.</p>
+            <button class="welcome-btn primary" id="sites-welcome-add">Add a Site</button>
+          </div>
+        </div>
+        <div id="site-detail" style="display:none;"></div>
+      </div>
+    </div>
+
+    <!-- ===================== Settings workspace ===================== -->
+    <div id="workspace-settings" class="workspace">
+      <div id="settings-page"></div>
+    </div>
+  </div>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="hidden"></div>
+
+  <!-- Inline prompt modal (new file/folder/rename) -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-box">
+      <div id="modal-title">New File</div>
+      <div id="modal-fields"></div>
+      <div id="modal-error"></div>
+      <div id="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-confirm" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- marked must load BEFORE Monaco's loader.js: Monaco's AMD loader defines
+       a global define() with define.amd set, and marked's UMD wrapper checks
+       for that — if it sees an AMD loader already present, it registers
+       itself as an anonymous AMD module through Monaco's loader instead of
+       setting window.marked, which is what we actually need. -->
+  <script src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

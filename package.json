@@ -1,0 +1,51 @@
+{
+  "name": "nexo-dev",
+  "productName": "Nexo Dev",
+  "version": "1.0.0",
+  "description": "A lightweight code editor and project manager for Windows.",
+  "main": "main.js",
+  "author": "Nexus",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.50.0",
+    "marked": "^18.0.7"
+  },
+  "build": {
+    "appId": "com.nexorealm.nexodev",
+    "productName": "Nexo Dev",
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "node_modules/monaco-editor/min/**/*",
+      "!node_modules/monaco-editor/min-maps",
+      "!node_modules/monaco-editor/esm",
+      "!node_modules/monaco-editor/dev",
+      "node_modules/marked/lib/marked.umd.js"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "renderer/icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/installer.nsh"
+    }
+  }
+}

@@ -1,0 +1,74 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('nexo', {
+  // dialogs
+  openFolder: () => ipcRenderer.invoke('dialog:open-folder'),
+  newProject: () => ipcRenderer.invoke('dialog:new-project'),
+  saveAsDialog: (defaultName) => ipcRenderer.invoke('dialog:save-as', defaultName),
+  revealInFolder: (targetPath) => ipcRenderer.invoke('shell:reveal', targetPath),
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  notifyReady: () => ipcRenderer.send('app:ready'),
+
+  // site monitoring + SEO audits
+  getSites: () => ipcRenderer.invoke('sites:get'),
+  addSite: (url, name) => ipcRenderer.invoke('sites:add', url, name),
+  removeSite: (id) => ipcRenderer.invoke('sites:remove', id),
+  checkSite: (id) => ipcRenderer.invoke('sites:check', id),
+  auditSite: (id) => ipcRenderer.invoke('sites:audit', id),
+  setSiteInterval: (id, minutes) => ipcRenderer.invoke('sites:set-interval', id, minutes),
+  onSitesUpdated: (callback) => ipcRenderer.on('sites:updated', (evt, list) => callback(list)),
+
+  // global search
+  searchText: (rootPath, query, opts) => ipcRenderer.invoke('search:text', rootPath, query, opts),
+
+  // git
+  gitStatus: (projectRoot) => ipcRenderer.invoke('git:status', projectRoot),
+  gitDiff: (projectRoot, relPath, staged) => ipcRenderer.invoke('git:diff', projectRoot, relPath, staged),
+  gitStage: (projectRoot, relPath) => ipcRenderer.invoke('git:stage', projectRoot, relPath),
+  gitUnstage: (projectRoot, relPath) => ipcRenderer.invoke('git:unstage', projectRoot, relPath),
+  gitDiscard: (projectRoot, relPath) => ipcRenderer.invoke('git:discard', projectRoot, relPath),
+  gitCommit: (projectRoot, message) => ipcRenderer.invoke('git:commit', projectRoot, message),
+  gitBranches: (projectRoot) => ipcRenderer.invoke('git:branches', projectRoot),
+  gitCheckoutBranch: (projectRoot, branchName) => ipcRenderer.invoke('git:checkout-branch', projectRoot, branchName),
+  gitCreateBranch: (projectRoot, branchName) => ipcRenderer.invoke('git:create-branch', projectRoot, branchName),
+  gitLog: (projectRoot, limit) => ipcRenderer.invoke('git:log', projectRoot, limit),
+  gitShowCommit: (projectRoot, hash) => ipcRenderer.invoke('git:show-commit', projectRoot, hash),
+  gitRemoteStatus: (projectRoot) => ipcRenderer.invoke('git:remote-status', projectRoot),
+  gitPush: (projectRoot) => ipcRenderer.invoke('git:push', projectRoot),
+  gitPull: (projectRoot) => ipcRenderer.invoke('git:pull', projectRoot),
+
+  // file moves (drag-and-drop in the explorer)
+  moveItem: (sourcePath, destDir) => ipcRenderer.invoke('fs:move', sourcePath, destDir),
+
+  // preferences
+  getPrefs: () => ipcRenderer.invoke('prefs:get'),
+  setPrefs: (partial) => ipcRenderer.invoke('prefs:set', partial),
+
+  // command runner (safe alternative to a full terminal)
+  runCommand: (cwd, command) => ipcRenderer.invoke('term:run', cwd, command),
+  killCommand: (id) => ipcRenderer.invoke('term:kill', id),
+  onTermData: (callback) => ipcRenderer.on('term:data', (evt, id, chunk) => callback(id, chunk)),
+  onTermExit: (callback) => ipcRenderer.on('term:exit', (evt, id, code) => callback(id, code)),
+
+  // recent projects
+  getRecent: () => ipcRenderer.invoke('recent:get'),
+  removeRecent: (folderPath) => ipcRenderer.invoke('recent:remove', folderPath),
+
+  // filesystem
+  readDir: (dirPath) => ipcRenderer.invoke('fs:read-dir', dirPath),
+  readFile: (filePath) => ipcRenderer.invoke('fs:read-file', filePath),
+  writeFile: (filePath, content) => ipcRenderer.invoke('fs:write-file', filePath, content),
+  createFile: (dirPath, name) => ipcRenderer.invoke('fs:create-file', dirPath, name),
+  createFolder: (dirPath, name) => ipcRenderer.invoke('fs:create-folder', dirPath, name),
+  deleteItem: (targetPath) => ipcRenderer.invoke('fs:delete', targetPath),
+  rename: (oldPath, newName) => ipcRenderer.invoke('fs:rename', oldPath, newName),
+  exists: (targetPath) => ipcRenderer.invoke('fs:exists', targetPath),
+  statPath: (targetPath) => ipcRenderer.invoke('fs:stat', targetPath),
+  onOpenPath: (callback) => ipcRenderer.on('open-path', (evt, p) => callback(p)),
+
+  // menu events
+  onMenu: (channel, callback) => {
+    const valid = ['menu:open-folder', 'menu:new-file', 'menu:save', 'menu:save-as', 'menu:toggle-sidebar', 'menu:toggle-terminal', 'menu:toggle-split', 'menu:show-search', 'menu:show-git'];
+    if (valid.includes(channel)) ipcRenderer.on(channel, callback);
+  },
+});
