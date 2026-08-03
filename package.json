@@ -1,7 +1,7 @@
 {
   "name": "nexo-dev",
   "productName": "Nexo Dev",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "A lightweight code editor and project manager for Windows.",
   "main": "main.js",
   "author": "Nexus",
@@ -17,9 +17,10 @@
     "electron-builder": "^24.13.3"
   },
   "dependencies": {
-    "monaco-editor": "^0.50.0",
+    "dompurify": "^3.4.12",
+    "electron-updater": "^6.8.9",
     "marked": "^18.0.7",
-    "electron-updater": "^6.8.9"
+    "monaco-editor": "^0.50.0"
   },
   "build": {
     "appId": "com.nexorealm.nexodev",
@@ -33,17 +34,29 @@
       "!node_modules/monaco-editor/min-maps",
       "!node_modules/monaco-editor/esm",
       "!node_modules/monaco-editor/dev",
-      "node_modules/marked/lib/marked.umd.js"
+      "node_modules/marked/lib/marked.umd.js",
+      "node_modules/dompurify/dist/purify.min.js"
     ],
     "publish": {
       "provider": "github",
       "owner": "itsnexoria",
-      "repo": "nexo-dev"
+      "repo": "nexo-dev",
+      "releaseType": "release"
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "renderer/icons/icon.ico"
     },

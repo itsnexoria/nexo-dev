@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell, Notification } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, Notification, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -260,19 +260,23 @@ const SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024; // skip anything bigger than 2MB
 const SEARCH_MAX_MATCHES = 500;
 const SEARCH_MAX_FILES_WITH_MATCHES = 200;
 
-function walkForSearch(root, query, caseSensitive, results, budget) {
+function walkForSearch(root, query, caseSensitive, results, budget, useRegex) {
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
   } catch {
     return;
   }
+  let lineRe = null;
+  if (useRegex) {
+    try { lineRe = new RegExp(query, caseSensitive ? 'g' : 'gi'); } catch { return; }
+  }
   for (const entry of entries) {
     if (results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES || results.matches.length >= SEARCH_MAX_MATCHES) return;
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      walkForSearch(full, query, caseSensitive, results, budget);
+      walkForSearch(full, query, caseSensitive, results, budget, useRegex);
       continue;
     }
     const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
@@ -293,20 +297,37 @@ function walkForSearch(root, query, caseSensitive, results, budget) {
     // crude binary check
     if (content.includes('\u0000')) continue;
 
-    const haystack = caseSensitive ? content : content.toLowerCase();
-    const needle = caseSensitive ? query : query.toLowerCase();
-    if (!haystack.includes(needle)) continue;
+    if (useRegex) {
+      lineRe.lastIndex = 0;
+      if (!lineRe.test(content)) continue;
+    } else {
+      const haystack = caseSensitive ? content : content.toLowerCase();
+      const needle = caseSensitive ? query : query.toLowerCase();
+      if (!haystack.includes(needle)) continue;
+    }
 
     const lines = content.split(/\r\n|\r|\n/);
     const fileMatches = [];
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const hLine = caseSensitive ? line : line.toLowerCase();
-      let idx = hLine.indexOf(needle);
-      while (idx !== -1) {
-        fileMatches.push({ line: i + 1, col: idx + 1, preview: line.trim().slice(0, 200) });
-        if (fileMatches.length >= 30) break; // cap matches per file
-        idx = hLine.indexOf(needle, idx + needle.length);
+      if (useRegex) {
+        lineRe.lastIndex = 0;
+        let m = lineRe.exec(line);
+        while (m) {
+          fileMatches.push({ line: i + 1, col: m.index + 1, preview: line.trim().slice(0, 200) });
+          if (fileMatches.length >= 30) break;
+          if (m[0].length === 0) lineRe.lastIndex++; // avoid infinite loop on zero-width matches
+          m = lineRe.exec(line);
+        }
+      } else {
+        const hLine = caseSensitive ? line : line.toLowerCase();
+        const needle = caseSensitive ? query : query.toLowerCase();
+        let idx = hLine.indexOf(needle);
+        while (idx !== -1) {
+          fileMatches.push({ line: i + 1, col: idx + 1, preview: line.trim().slice(0, 200) });
+          if (fileMatches.length >= 30) break; // cap matches per file
+          idx = hLine.indexOf(needle, idx + needle.length);
+        }
       }
       if (fileMatches.length >= 30) break;
     }
@@ -320,13 +341,27 @@ function walkForSearch(root, query, caseSensitive, results, budget) {
 // ---------- Git integration (shells out to the system `git`, no native deps) ----------
 function runGit(args, cwd, opts = {}) {
   return new Promise((resolve) => {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    if (opts.authSensitive) {
+      // GIT_TERMINAL_PROMPT only suppresses git's own text-based prompt —
+      // it does nothing to stop a GUI credential helper (e.g. Windows' Git
+      // Credential Manager) from popping up its own window, which is easy
+      // to miss behind the app and looks exactly like a silent hang.
+      // GIT_ASKPASS/SSH_ASKPASS point at a command that returns nothing,
+      // so any credential request fails immediately instead of waiting on
+      // a prompt nobody's going to see. Cached credentials (a helper that
+      // already has a valid token) are unaffected — this only kicks in
+      // when git would otherwise need to *ask*.
+      const noPrompt = process.platform === 'win32' ? 'cmd.exe /c exit 1' : 'true';
+      env.GIT_ASKPASS = noPrompt;
+      env.SSH_ASKPASS = noPrompt;
+      env.SSH_ASKPASS_REQUIRE = 'force';
+    }
     execFile('git', args, {
       cwd,
       maxBuffer: 20 * 1024 * 1024,
-      timeout: opts.timeoutMs || 0, // 0 = no timeout (used for push/pull below)
-      // No tty is attached to this process, so an interactive credential
-      // prompt would just hang forever. Fail fast with a clear error instead.
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      timeout: opts.timeoutMs || 0, // 0 = no timeout
+      env,
     }, (err, stdout, stderr) => {
       resolve({ ok: !err, code: err ? err.code : 0, stdout: stdout || '', stderr: stderr || (err ? err.message : '') });
     });
@@ -410,12 +445,15 @@ const DEFAULT_PREFS = {
   fontSize: 13.5,
   minimap: true,
   wordWrap: false,
+  bracketGuides: false,
   autoSave: false,
   autoSaveDelayMs: 1000,
   defaultSiteInterval: 10,
   customShell: '',
   customTheme: { bg: '#0c0c10', text: '#ececf0', accent: '#ff3b30' },
   customThemes: [], // saved named presets: [{ id, name, bg, text, accent }]
+  scriptsOrder: [],
+  snippets: [], // [{ id, prefix, body, language }]
 };
 const prefsFilePath = () => path.join(app.getPath('userData'), 'prefs.json');
 function readPrefs() {
@@ -445,6 +483,7 @@ function sanitizePrefsPartial(partial) {
   }
   if (partial.minimap !== undefined) clean.minimap = !!partial.minimap;
   if (partial.wordWrap !== undefined) clean.wordWrap = !!partial.wordWrap;
+  if (partial.bracketGuides !== undefined) clean.bracketGuides = !!partial.bracketGuides;
   if (partial.autoSave !== undefined) clean.autoSave = !!partial.autoSave;
   if (partial.autoSaveDelayMs !== undefined) {
     clean.autoSaveDelayMs = Math.max(200, Math.min(10000, Number(partial.autoSaveDelayMs) || 1000));
@@ -474,6 +513,25 @@ function sanitizePrefsPartial(partial) {
         accent: HEX_COLOR_RE.test(p.accent) ? p.accent : DEFAULT_PREFS.customTheme.accent,
       }));
   }
+  if (partial.scriptsOrder !== undefined && Array.isArray(partial.scriptsOrder)) {
+    clean.scriptsOrder = partial.scriptsOrder
+      .filter((s) => typeof s === 'string')
+      .slice(0, 200)
+      .map((s) => s.slice(0, 200));
+  }
+  if (partial.snippets !== undefined && Array.isArray(partial.snippets)) {
+    clean.snippets = partial.snippets
+      .filter((s) => s && typeof s === 'object')
+      .slice(0, 300)
+      .map((s) => ({
+        id: typeof s.id === 'string' && s.id ? s.id.slice(0, 100) : `snip_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        prefix: typeof s.prefix === 'string' ? s.prefix.trim().slice(0, 60) : '',
+        body: typeof s.body === 'string' ? s.body.slice(0, 20000) : '',
+        language: typeof s.language === 'string' && s.language ? s.language.slice(0, 40) : 'all',
+        description: typeof s.description === 'string' ? s.description.slice(0, 200) : '',
+      }))
+      .filter((s) => s.prefix && s.body);
+  }
   return clean;
 }
 
@@ -482,6 +540,56 @@ ipcMain.handle('prefs:set', (evt, partial) => {
   const merged = { ...readPrefs(), ...sanitizePrefsPartial(partial || {}) };
   writePrefs(merged);
   return merged;
+});
+
+// ---------- Session store (crash recovery) ----------
+// Keyed by project root path, so each project remembers its own last set of
+// open tabs. Written proactively on every tab change (not just on clean
+// shutdown) specifically so a crash or force-close still leaves a usable
+// snapshot on disk to restore from next time that project opens.
+const sessionsFilePath = () => path.join(app.getPath('userData'), 'sessions.json');
+function readSessions() {
+  try {
+    return JSON.parse(fs.readFileSync(sessionsFilePath(), 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+function writeSessions(sessions) {
+  try {
+    fs.writeFileSync(sessionsFilePath(), JSON.stringify(sessions, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write sessions:', err);
+  }
+}
+
+ipcMain.handle('session:save', (evt, projectRoot, data) => {
+  if (!projectRoot) return { ok: false };
+  const sessions = readSessions();
+  if (!data || !data.openTabs || !data.openTabs.length) {
+    delete sessions[projectRoot]; // nothing open — don't keep a stale entry around
+  } else {
+    sessions[projectRoot] = {
+      openTabs: data.openTabs.slice(0, 50).map((t) => ({
+        path: String(t.path || '').slice(0, 1000),
+        pinned: !!t.pinned,
+        cursor: (t.cursor && Number.isFinite(t.cursor.line) && Number.isFinite(t.cursor.column))
+          ? { line: Math.max(1, Math.floor(t.cursor.line)), column: Math.max(1, Math.floor(t.cursor.column)) }
+          : null,
+      })),
+      activeTab: data.activeTab ? String(data.activeTab).slice(0, 1000) : null,
+      savedAt: Date.now(),
+    };
+  }
+  // Cap how many projects' sessions we remember, dropping the oldest.
+  const entries = Object.entries(sessions).sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0));
+  writeSessions(Object.fromEntries(entries.slice(0, 50)));
+  return { ok: true };
+});
+
+ipcMain.handle('session:load', (evt, projectRoot) => {
+  const sessions = readSessions();
+  return sessions[projectRoot] || null;
 });
 
 // ---------- Window ----------
@@ -736,6 +844,34 @@ ipcMain.handle('dialog:new-project', async () => {
   return { folder: nameResult.filePath, recent };
 });
 
+// Plain "pick a folder" dialog that doesn't touch the recent-projects list —
+// used for choosing where to clone a repo into, not opening one directly.
+ipcMain.handle('dialog:pick-folder', async (evt, title) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: title || 'Choose a folder',
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('git:clone', async (evt, url, destParentDir) => {
+  let name = (url.trim().split('/').pop() || 'repository').replace(/\.git$/i, '');
+  name = name.replace(/[<>:"|?*]/g, '').trim() || 'repository';
+  let destDir = path.join(destParentDir, name);
+  let suffix = 1;
+  while (fs.existsSync(destDir)) {
+    destDir = path.join(destParentDir, `${name}-${suffix}`);
+    suffix++;
+  }
+  const trimmedUrl = url.trim();
+  const authArgs = /^https:\/\/(www\.)?github\.com\//i.test(trimmedUrl) ? githubAuthHeaderArgs(readGithubToken()) : [];
+  const res = await runGit([...authArgs, 'clone', trimmedUrl, destDir], destParentDir, { authSensitive: true, timeoutMs: 300000 });
+  if (!res.ok) return { ok: false, error: res.stderr || res.stdout || 'Clone failed.' };
+  const recent = addRecent(destDir);
+  return { ok: true, path: destDir, recent };
+});
+
 ipcMain.handle('dialog:save-as', async (evt, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, { defaultPath: defaultName });
   if (result.canceled || !result.filePath) return null;
@@ -905,15 +1041,335 @@ ipcMain.handle('shell:open-external', (evt, url) => shell.openExternal(url));
 // ---------- IPC: global search ----------
 ipcMain.handle('search:text', async (evt, rootPath, query, opts = {}) => {
   if (!query || !query.trim()) return { matches: [], truncated: false };
+  if (opts.useRegex) {
+    try { new RegExp(query); } catch (err) { return { matches: [], truncated: false, error: err.message }; }
+  }
   const results = { matches: [], matchedFiles: 0 };
-  walkForSearch(rootPath, query, !!opts.caseSensitive, results, {});
+  walkForSearch(rootPath, query, !!opts.caseSensitive, results, {}, !!opts.useRegex);
   return {
     matches: results.matches,
     truncated: results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES || results.matches.length >= SEARCH_MAX_MATCHES,
   };
 });
 
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function walkForReplace(root, re, replacement, results) {
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (results.filesChanged >= SEARCH_MAX_FILES_WITH_MATCHES) return;
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      walkForReplace(full, re, replacement, results);
+      continue;
+    }
+    const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
+    if (SEARCH_SKIP_EXT.has(ext)) continue;
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.size > SEARCH_MAX_FILE_BYTES) continue;
+    let content;
+    try {
+      content = fs.readFileSync(full, 'utf-8');
+    } catch {
+      continue;
+    }
+    if (content.includes('\u0000')) continue;
+
+    re.lastIndex = 0;
+    const matches = content.match(re);
+    if (!matches || !matches.length) continue;
+
+    try {
+      const updated = content.replace(re, replacement);
+      fs.writeFileSync(full, updated, 'utf-8');
+      recentWrites.set(full, Date.now()); // same self-write guard the file watcher already respects
+      results.filesChanged++;
+      results.totalReplacements += matches.length;
+      results.changedPaths.push(full);
+    } catch (err) {
+      results.errors.push({ path: full, error: err.message });
+    }
+  }
+}
+
+ipcMain.handle('search:replace-all', async (evt, rootPath, query, replacement, opts = {}) => {
+  if (!query) return { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [] };
+  let re;
+  let safeReplacement;
+  if (opts.useRegex) {
+    try {
+      re = new RegExp(query, opts.caseSensitive ? 'g' : 'gi');
+    } catch (err) {
+      return { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [{ path: '', error: `Invalid regex: ${err.message}` }] };
+    }
+    // Regex mode: $1, $2, etc. are honored as capture-group references.
+    safeReplacement = String(replacement);
+  } else {
+    re = new RegExp(escapeRegExp(query), opts.caseSensitive ? 'g' : 'gi');
+    // Escape $ in the replacement so String.replace doesn't treat it as a
+    // special pattern ($&, $1, etc.) — this is a literal find & replace, not
+    // a regex-capture-group replace.
+    safeReplacement = String(replacement).replace(/\$/g, '$$$$');
+  }
+  const results = { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [] };
+  walkForReplace(rootPath, re, safeReplacement, results);
+  return results;
+});
+
+// Flat recursive file list (paths only) for Quick Open — reuses the same
+// ignore rules as global search so it skips node_modules/.git/build output.
+const QUICK_OPEN_MAX_FILES = 5000;
+function walkForFileList(root, out) {
+  if (out.length >= QUICK_OPEN_MAX_FILES) return;
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (out.length >= QUICK_OPEN_MAX_FILES) return;
+    if (entry.isDirectory()) {
+      if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      walkForFileList(path.join(root, entry.name), out);
+      continue;
+    }
+    out.push(path.join(root, entry.name));
+  }
+}
+
+ipcMain.handle('fs:list-files', async (evt, rootPath) => {
+  const out = [];
+  walkForFileList(rootPath, out);
+  return { files: out, truncated: out.length >= QUICK_OPEN_MAX_FILES };
+});
+
 // ---------- IPC: git ----------
+// ---------- GitHub API integration ----------
+// The token is encrypted at rest with the OS keychain (safeStorage) rather
+// than living in plain text in prefs.json — it's a real credential, not a
+// UI preference.
+function githubTokenPath() { return path.join(app.getPath('userData'), 'github-token.enc'); }
+
+function saveGithubToken(token) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('OS-level credential encryption is unavailable on this system, so the token cannot be stored securely.');
+  }
+  fs.writeFileSync(githubTokenPath(), safeStorage.encryptString(token));
+}
+
+function readGithubToken() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const enc = fs.readFileSync(githubTokenPath());
+    return safeStorage.decryptString(enc);
+  } catch {
+    return null;
+  }
+}
+
+function clearGithubToken() {
+  try { fs.unlinkSync(githubTokenPath()); } catch { /* already gone */ }
+}
+
+function githubApiRequest(method, urlPath, body, tokenOverride) {
+  return new Promise((resolve) => {
+    const token = tokenOverride || readGithubToken();
+    if (!token) { resolve({ ok: false, status: 0, error: 'No GitHub token saved. Add one in Settings.' }); return; }
+    const data = body ? JSON.stringify(body) : null;
+    const req = https.request({
+      hostname: 'api.github.com',
+      path: urlPath,
+      method,
+      headers: {
+        'User-Agent': 'Nexo-Dev',
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}),
+      },
+      timeout: 15000,
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c; });
+      res.on('end', () => {
+        let json = null;
+        try { json = raw ? JSON.parse(raw) : null; } catch { /* non-JSON body */ }
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve({ ok: true, status: res.statusCode, data: json });
+        else resolve({ ok: false, status: res.statusCode, error: (json && json.message) || `GitHub API error ${res.statusCode}` });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Request to GitHub timed out.')));
+    req.on('error', (err) => resolve({ ok: false, status: 0, error: err.message }));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// Only inject the token for github.com HTTPS remotes — never for SSH remotes
+// (which use your existing SSH keys) or other hosts (self-hosted GitLab,
+// Bitbucket, etc.) where this PAT has no business being sent.
+function githubAuthHeaderArgs(token) {
+  if (!token) return [];
+  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+  // Scoped via -c to this single invocation — never written to .git/config,
+  // never appears in `git remote -v`, and doesn't touch the stored remote URL.
+  return ['-c', `http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`];
+}
+
+async function githubAuthArgsForRemote(root) {
+  const token = readGithubToken();
+  if (!token) return [];
+  const remoteRes = await runGit(['remote', 'get-url', 'origin'], root);
+  if (!remoteRes.ok || !/^https:\/\/(www\.)?github\.com\//i.test(remoteRes.stdout.trim())) return [];
+  return githubAuthHeaderArgs(token);
+}
+
+function parseGithubOwnerRepo(remoteUrl) {
+  const m = remoteUrl.trim().match(/github\.com[:/]([^/]+)\/(.+?)(\.git)?$/);
+  if (!m) return null;
+  return { owner: m[1], repo: m[2].replace(/\.git$/, '') };
+}
+
+async function getGithubOwnerRepo(root) {
+  const res = await runGit(['remote', 'get-url', 'origin'], root);
+  if (!res.ok) return null;
+  return parseGithubOwnerRepo(res.stdout);
+}
+
+ipcMain.handle('github:set-token', async (evt, token) => {
+  const trimmed = (token || '').trim();
+  if (!trimmed) return { ok: false, error: 'Token cannot be empty.' };
+  const res = await githubApiRequest('GET', '/user', null, trimmed);
+  if (!res.ok) return { ok: false, error: res.status === 401 ? 'That token was rejected by GitHub — check it was copied correctly and has not expired.' : res.error };
+  try {
+    saveGithubToken(trimmed);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  return { ok: true, user: { login: res.data.login, avatar: res.data.avatar_url, name: res.data.name } };
+});
+
+ipcMain.handle('github:get-user', async () => {
+  if (!readGithubToken()) return { ok: false, error: 'No token saved.' };
+  const res = await githubApiRequest('GET', '/user');
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true, user: { login: res.data.login, avatar: res.data.avatar_url, name: res.data.name } };
+});
+
+ipcMain.handle('github:clear-token', () => { clearGithubToken(); return { ok: true }; });
+ipcMain.handle('github:has-token', () => ({ hasToken: !!readGithubToken() }));
+
+ipcMain.handle('github:list-repos', async () => {
+  const res = await githubApiRequest('GET', '/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member');
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    repos: res.data.map((r) => ({
+      fullName: r.full_name, cloneUrl: r.clone_url, private: r.private,
+      description: r.description, updatedAt: r.updated_at,
+    })),
+  };
+});
+
+ipcMain.handle('github:create-repo', async (evt, { name, description, isPrivate }) => {
+  if (!name || !name.trim()) return { ok: false, error: 'Repository name is required.' };
+  const res = await githubApiRequest('POST', '/user/repos', { name: name.trim(), description: description || '', private: !!isPrivate });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true, repo: { fullName: res.data.full_name, cloneUrl: res.data.clone_url, htmlUrl: res.data.html_url } };
+});
+
+ipcMain.handle('github:list-pulls', async (evt, projectRoot) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const or = await getGithubOwnerRepo(root);
+  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
+  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/pulls?state=open&per_page=50`);
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    pulls: res.data.map((p) => ({
+      number: p.number, title: p.title, author: p.user.login, url: p.html_url,
+      draft: p.draft, branch: p.head.ref, updatedAt: p.updated_at,
+    })),
+  };
+});
+
+ipcMain.handle('github:list-issues', async (evt, projectRoot) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const or = await getGithubOwnerRepo(root);
+  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
+  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/issues?state=open&per_page=50`);
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    // The issues endpoint also returns PRs — filter those out, they're covered by list-pulls.
+    issues: res.data.filter((i) => !i.pull_request).map((i) => ({
+      number: i.number, title: i.title, author: i.user.login, url: i.html_url,
+      updatedAt: i.updated_at, labels: (i.labels || []).map((l) => (typeof l === 'string' ? l : l.name)),
+    })),
+  };
+});
+
+function findLocalEslintBin(root) {
+  const bin = process.platform === 'win32' ? 'eslint.cmd' : 'eslint';
+  const p = path.join(root, 'node_modules', '.bin', bin);
+  return fs.existsSync(p) ? p : null;
+}
+
+ipcMain.handle('eslint:lint', async (evt, projectRoot, filePath, content) => {
+  if (!projectRoot) return { ok: false, reason: 'not-found' };
+  const bin = findLocalEslintBin(projectRoot);
+  if (!bin) return { ok: false, reason: 'not-found' };
+  const useStdin = typeof content === 'string';
+  const args = useStdin
+    ? ['--format', 'json', '--no-color', '--stdin', '--stdin-filename', filePath]
+    : ['--format', 'json', '--no-color', filePath];
+  return new Promise((resolve) => {
+    const child = execFile(bin, args, { cwd: projectRoot, timeout: 15000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      // ESLint exits with code 1 when it finds lint problems — that's not a
+      // real failure, stdout still has valid JSON either way.
+      if (!stdout) { resolve({ ok: false, reason: 'error', error: err ? err.message : 'No output from ESLint.' }); return; }
+      try {
+        const results = JSON.parse(stdout);
+        const resolved = path.resolve(filePath);
+        const fileResult = results.find((r) => path.resolve(r.filePath) === resolved) || results[0];
+        const messages = fileResult ? fileResult.messages : [];
+        resolve({
+          ok: true,
+          messages: messages
+            .filter((m) => Number.isFinite(m.line)) // fatal parse errors sometimes omit position info
+            .map((m) => ({
+              line: m.line, column: m.column || 1,
+              endLine: m.endLine || m.line, endColumn: m.endColumn || (m.column || 1) + 1,
+              severity: m.severity, message: m.message, ruleId: m.ruleId || null,
+            })),
+        });
+      } catch {
+        resolve({ ok: false, reason: 'error', error: 'Could not parse ESLint output.' });
+      }
+    });
+    if (useStdin) {
+      child.stdin.write(content);
+      child.stdin.end();
+    }
+  });
+});
+
 ipcMain.handle('git:status', async (evt, projectRoot) => {
   const root = await getGitRoot(projectRoot);
   if (!root) return { ok: false, error: 'Not a git repository.' };
@@ -922,6 +1378,43 @@ ipcMain.handle('git:status', async (evt, projectRoot) => {
   const { staged, unstaged, conflicts } = parsePorcelainStatus(res.stdout);
   const branchRes = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root);
   return { ok: true, root, branch: branchRes.ok ? branchRes.stdout.trim() : '', staged, unstaged, conflicts };
+});
+
+// Parses `git blame --line-porcelain` output. Full commit metadata is only
+// emitted the first time each commit appears in the stream — later lines
+// from the same commit just repeat the hash line then jump straight to the
+// tab-prefixed content line — so metadata is cached by hash and reused.
+function parseBlamePorcelain(output) {
+  const lines = output.split('\n');
+  const commits = {};
+  const result = {};
+  let i = 0;
+  while (i < lines.length) {
+    const header = lines[i].match(/^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$/);
+    if (!header) { i++; continue; }
+    const hash = header[1];
+    const finalLine = parseInt(header[2], 10);
+    i++;
+    if (!commits[hash]) commits[hash] = { hash, author: '', time: 0, summary: '' };
+    while (i < lines.length && !lines[i].startsWith('\t')) {
+      const l = lines[i];
+      if (l.startsWith('author ')) commits[hash].author = l.slice(7);
+      else if (l.startsWith('author-time ')) commits[hash].time = parseInt(l.slice(12), 10) || 0;
+      else if (l.startsWith('summary ')) commits[hash].summary = l.slice(8);
+      i++;
+    }
+    if (i < lines.length && lines[i].startsWith('\t')) i++; // consume the "\t<line content>" line
+    result[finalLine] = commits[hash];
+  }
+  return result;
+}
+
+ipcMain.handle('git:blame', async (evt, projectRoot, filePath) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const res = await runGit(['blame', '--line-porcelain', '--', filePath], root, { timeoutMs: 15000 });
+  if (!res.ok) return { ok: false, error: res.stderr || 'git blame failed.' }; // e.g. untracked/new file — not an error worth surfacing
+  return { ok: true, lines: parseBlamePorcelain(res.stdout) };
 });
 
 ipcMain.handle('git:diff', async (evt, projectRoot, relPath, staged) => {
@@ -1040,14 +1533,15 @@ ipcMain.handle('git:remote-status', async (evt, projectRoot) => {
 ipcMain.handle('git:push', async (evt, projectRoot) => {
   const root = await getGitRoot(projectRoot);
   if (!root) return { ok: false, error: 'Not a git repository.' };
+  const authArgs = await githubAuthArgsForRemote(root);
   const upstream = await runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], root);
   let res;
   if (!upstream.ok) {
     const branchRes = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root);
     const branch = branchRes.stdout.trim();
-    res = await runGit(['push', '--set-upstream', 'origin', branch], root, { timeoutMs: 30000 });
+    res = await runGit([...authArgs, 'push', '--set-upstream', 'origin', branch], root, { authSensitive: true, timeoutMs: 30000 });
   } else {
-    res = await runGit(['push'], root, { timeoutMs: 30000 });
+    res = await runGit([...authArgs, 'push'], root, { authSensitive: true, timeoutMs: 30000 });
   }
   return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Push failed.') };
 });
@@ -1055,7 +1549,8 @@ ipcMain.handle('git:push', async (evt, projectRoot) => {
 ipcMain.handle('git:pull', async (evt, projectRoot) => {
   const root = await getGitRoot(projectRoot);
   if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['pull'], root, { timeoutMs: 30000 });
+  const authArgs = await githubAuthArgsForRemote(root);
+  const res = await runGit([...authArgs, 'pull'], root, { authSensitive: true, timeoutMs: 30000 });
   return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Pull failed.') };
 });
 

@@ -7,7 +7,8 @@ A lightweight, standalone code editor and project manager for Windows — built 
 Five views, switchable from the icon rail on the far left. Files, Search, and Git share the same tabbed editor; Sites and Settings are separate workspaces.
 
 ### 📁 Files — code editor & project manager
-- **Open Folder / New Project** — open any local folder as a project, or create a new one
+- **Open Folder / New Project / Clone Repository** — open any local folder as a project, create a new one, or clone straight from a URL (asks where to put it, then opens it automatically once cloning finishes)
+- **Crash recovery** — your open tabs (and which one was pinned/active) are remembered per-project as you work, not just on a clean exit, so a crash or force-close doesn't lose your place. Reopening a project silently restores whatever was open last time.
 - **File tree** — expand/collapse folders, right-click to create, rename, delete, or reveal files/folders; drag and drop files/folders to move them, including dropping onto empty space to move something to the project root; changed files show a colored git status badge (M/A/D/etc.) right in the tree
 - **Multi-tab editor** — Monaco-powered syntax highlighting for JS/TS, Python, HTML/CSS, JSON, Markdown, and more
 - **Markdown preview** — open a `.md`/`.markdown` file (like this README) and it renders instead of showing raw text: headings, code blocks, tables, blockquotes, lists, images, the works. Hit "✏️ Edit" to switch to the raw source, or "👁 Preview" to switch back — each file remembers which mode you last had it in. External links in the preview open in your system browser.
@@ -29,16 +30,17 @@ Five views, switchable from the icon rail on the far left. Files, Search, and Gi
 - **Copy Path / Copy Relative Path** — available in the tree's right-click menu for any single file or folder too.
 - **Keyboard shortcuts**: `Ctrl+O` open folder, `Ctrl+N` new file, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+W` close tab, `Ctrl+Shift+T` reopen closed tab, `Ctrl+B` toggle sidebar, `` Ctrl+` `` toggle terminal, `Ctrl+\` toggle split editor, `Ctrl+K Z` toggle zen mode, `Ctrl+=`/`Ctrl+-`/`Ctrl+0` font zoom
 
-### 🔎 Search — find in files
+### 🔎 Search — find & replace across files
 - Type in the search box (`Ctrl+Shift+F`) to search across every file in the open project, live as you type
 - Results grouped by file with line numbers and highlighted matches; click any result to jump straight to that line/column in the editor
 - Case-sensitive toggle; automatically skips `node_modules`, `.git`, binaries, and anything over 2MB
+- **Replace All** — click the ⇄ icon to reveal a replace field. Confirms the file count before touching anything, rewrites every match across the project in one go, and automatically refreshes any of the changed files you already have open (silently, since it's the app's own change — no false "changed externally" prompt)
 
 ### 🌿 Git — source control (`Ctrl+Shift+G`)
 - **Auto-detects your git repo the moment you open a folder** — no need to click into the Git panel first. It walks up from the opened folder to find the nearest `.git`, so it works even if you open a subfolder of a larger repo. File tree status badges and the change count on the rail icon populate immediately.
 - A small red badge on the 🌿 rail icon shows how many files have changes, so you always know at a glance
 - **Branch switching** — click "Switch" next to the branch name to see all local branches, check one out, or create a new one on the spot
-- **Push / Pull** — buttons right in the branch row, with a live ↑ahead/↓behind indicator against your upstream. First push on a new branch sets the upstream automatically. Credential prompts are disabled (there's no terminal to type into), so an auth failure surfaces as a clear error instead of hanging — set up a credential helper or SSH key beforehand if pushing over HTTPS.
+- **Push / Pull** — buttons right in the branch row, with a live ↑ahead/↓behind indicator against your upstream. First push on a new branch sets the upstream automatically. Shows "Still working…" after a few seconds so a slow operation doesn't look identical to a stuck one. Credential prompts are disabled at every level — including GUI credential helpers like Windows' Git Credential Manager, which can otherwise pop a window that's easy to miss behind the app and looks exactly like a silent hang — so an auth failure surfaces as a clear error instead. Cached credentials (a helper that already has a valid token) still work fine; this only kicks in when git would otherwise need to *ask*.
 - **Commit history** — a "History" tab alongside "Changes" shows the last 50 commits (hash, author, relative date, message); click any commit to see its full diff in the editor area
 - **Merge conflict resolution** — files with unresolved conflicts (from a pull or merge) show up in their own "MERGE CONFLICTS" section with an orange badge, and the rail icon itself turns orange. Click a conflicted file to open it directly in the editor, where a banner appears with **Accept Current**, **Accept Incoming**, and **Accept Both** buttons — each resolves the conflict block nearest your cursor, and "Next ▾" jumps to the next one without resolving. The conflicting regions are also highlighted inline in the editor itself (green for your changes, blue for the incoming ones, with a colored bar in the gutter) so you can see exactly where they are without hunting for `<<<<<<<` markers. Once you're done, hit the ✓ on the file in the Git panel to stage it as resolved.
 - **Staged** and **unstaged changes** sections, each file with a status badge and stage/unstage/discard buttons
@@ -61,6 +63,7 @@ Five views, switchable from the icon rail on the far left. Files, Search, and Gi
 
 ### 💻 Terminal (`` Ctrl+` ``)
 - A bottom panel for running one-off commands (`npm install`, `git pull`, build scripts, etc.) in the project root, streaming live output
+- **ANSI color rendering** — colored output from npm, git, linters, test runners, etc. renders with real colors and bold/italic/underline instead of being stripped to plain text. Supports the standard 16-color palette, 256-color, and truecolor (`38;2;r;g;b`) escape codes.
 - Command history with ↑/↓ recall, Stop button to kill a running command, resizable by dragging its top edge
 - **Why not a full terminal?** A real interactive terminal needs `node-pty`, which requires native compilation — a common source of broken installs on end-user Windows machines without build tools set up. This gives you the 90% use case (run a command, see the output) with zero native dependencies and nothing that can fail to build. Say the word if you'd rather have the full pty-backed terminal and accept that tradeoff.
 
@@ -141,7 +144,7 @@ npm run release
 
 A couple of things worth knowing:
 - `GH_TOKEN` only needs to be set in that terminal session — it's read once when the command runs, not saved anywhere. Set it again next time you publish (or add it to your shell profile if you don't want to repeat it, though keep in mind anything with access to that profile can read it).
-- Releases created this way default to a tag matching the `version` in `package.json` (e.g. `v1.1.0`) and are marked as a full release, not a draft — existing installs will see it as an available update as soon as it's live.
+- Releases created this way go live immediately as a full release (`"releaseType": "release"` in `package.json`'s publish config) — the moment a release finishes uploading, it's public and existing installs will see it as an available update on their next check. electron-builder's own default is actually to create a **draft** release instead (so you can review before publishing), which is what happened the first time this was run before that setting was added — if you'd rather go back to reviewing each release manually before it goes live, change `"releaseType": "release"` to `"releaseType": "draft"` and click "Publish release" on GitHub yourself when ready.
 
 **Only the NSIS installer supports auto-update** — the portable `.exe` has no persistent install location for the updater to replace, so it's not part of this flow.
 
@@ -213,21 +216,19 @@ nexo-dev/
 - The app enforces a single running instance (`app.requestSingleInstanceLock()`). Opening a second file/folder via "Open with Nexo Dev" while the app is already running doesn't launch a second window — Electron hands the new process's arguments to the existing one, which focuses itself and opens the path there instead.
 - The gitignore-aware tree filter uses `git ls-files --others --ignored --exclude-standard --directory` to get the ignored-paths list — the `--directory` flag collapses a wholly-ignored folder into one entry instead of listing every file inside it, so filtering a big ignored folder like `node_modules` stays cheap.
 - External change detection only watches files you actually have open (not the whole project), and guards against reacting to the app's own writes: every successful save records a timestamp, and file-watcher events within a second of that are ignored as likely self-triggered.
+- Both the file tree and the Git status panel guard against overlapping refreshes with a "latest wins" token — if two refreshes are in flight at once (e.g. staging a file while another refresh is still running), the slower one's stale result gets discarded instead of silently overwriting the newer, correct one. This is what was causing the commit button to stay disabled right after staging a file — fixed by applying the same pattern used for the file tree's equivalent race.
 
 ## Adding an app icon
 
 Already wired up — `renderer/icons/icon.ico` (multi-resolution, generated from your logo) is referenced in `package.json` under `build.win.icon` and used for the window/taskbar icon too. Replace that file with a new `.ico` any time you want to update it.
 
-## Ideas for v15
+## Ideas for v16
 
 - Full pty-backed interactive terminal (via `node-pty`) if you want to accept the native-build tradeoff
 - Multi-window editing
 - Exporting/importing theme presets as a shareable file
-- Find & Replace across files (project-wide search exists; replace-all doesn't yet)
 - Git stash support, blame annotations, remote management from the UI
-- ANSI color rendering in the Terminal panel (currently stripped to plain text)
 - SSL certificate expiry checks and exportable reports in Sites Monitor
 - Generic file-vs-file compare (not just git diffs)
-- Crash recovery — auto-restore open tabs after a crash or force-close
 
 Just say the word and I'll build any of these next.

@@ -41,6 +41,15 @@
       <button class="rail-btn" id="rail-sites" data-view="sites" title="Sites Monitor &amp; SEO">
         <span class="rail-icon">🌐</span><span class="rail-label">Sites</span>
       </button>
+      <button class="rail-btn" id="rail-scripts" data-view="scripts" title="npm Scripts">
+        <span class="rail-icon">📜</span><span class="rail-label">Scripts</span>
+      </button>
+      <button class="rail-btn" id="rail-outline" data-view="outline" title="Outline">
+        <span class="rail-icon">🧭</span><span class="rail-label">Outline</span>
+      </button>
+      <button class="rail-btn" id="rail-github" data-view="github" title="GitHub PRs &amp; Issues">
+        <span class="rail-icon">🐙</span><span class="rail-label">GitHub</span>
+      </button>
       <button class="rail-btn rail-btn-bottom" id="rail-settings" data-view="settings" title="Settings">
         <span class="rail-icon">⚙️</span><span class="rail-label">Settings</span>
       </button>
@@ -66,8 +75,18 @@
         <div id="panel-search" class="sidebar-panel">
           <div class="panel-header"><span>SEARCH</span></div>
           <div id="search-box">
-            <input id="search-input" type="text" placeholder="Search in project…" spellcheck="false" autocomplete="off" />
+            <div class="search-input-row">
+              <button class="icon-btn" id="btn-toggle-replace" title="Toggle Replace">⇄</button>
+              <input id="search-input" type="text" placeholder="Search in project…" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="search-input-row hidden" id="replace-row">
+              <span class="search-input-spacer"></span>
+              <input id="replace-input" type="text" placeholder="Replace with…" spellcheck="false" autocomplete="off" />
+              <button class="icon-btn" id="btn-replace-all" title="Replace All">Replace All</button>
+            </div>
             <label id="search-case-toggle"><input type="checkbox" id="search-case" /> Case sensitive</label>
+            <label id="search-regex-toggle"><input type="checkbox" id="search-regex" /> Use regex</label>
+            <div id="search-regex-error" class="hidden"></div>
           </div>
           <div id="search-summary" class="muted"></div>
           <div id="search-results"></div>
@@ -96,6 +115,34 @@
           </div>
           <div id="git-body"></div>
         </div>
+
+        <!-- npm Scripts panel -->
+        <div id="panel-scripts" class="sidebar-panel">
+          <div class="panel-header">
+            <span>NPM SCRIPTS</span>
+            <div id="scripts-actions"><button class="icon-btn" id="btn-scripts-refresh" title="Refresh">↻</button></div>
+          </div>
+          <div id="scripts-list"></div>
+        </div>
+
+        <!-- Outline panel -->
+        <div id="panel-outline" class="sidebar-panel">
+          <div class="panel-header"><span>OUTLINE</span></div>
+          <div id="outline-list"></div>
+        </div>
+
+        <!-- GitHub PRs / Issues panel -->
+        <div id="panel-github" class="sidebar-panel">
+          <div class="panel-header">
+            <span>GITHUB</span>
+            <div id="github-actions"><button class="icon-btn" id="btn-github-refresh" title="Refresh">↻</button></div>
+          </div>
+          <div id="github-subtabs">
+            <button class="git-subtab active" id="github-tab-pulls" data-tab="pulls">Pull Requests</button>
+            <button class="git-subtab" id="github-tab-issues" data-tab="issues">Issues</button>
+          </div>
+          <div id="github-body"></div>
+        </div>
       </div>
 
       <div id="resizer"></div>
@@ -114,6 +161,8 @@
                 <div class="welcome-actions">
                   <button class="welcome-btn primary" id="welcome-open">Open Folder</button>
                   <button class="welcome-btn" id="welcome-new">New Project</button>
+                  <button class="welcome-btn" id="welcome-clone">Clone Repository</button>
+                  <button class="welcome-btn" id="welcome-github-repos">Browse GitHub Repos</button>
                 </div>
 
                 <div id="recent-section">
@@ -170,6 +219,7 @@
               <button class="icon-btn" id="term-close" title="Close terminal">✕</button>
             </div>
           </div>
+          <div id="terminal-tabs"></div>
           <div id="terminal-output"></div>
           <div id="terminal-input-row">
             <span class="term-prompt">&gt;</span>
@@ -222,6 +272,14 @@
   <div id="context-menu" class="hidden"></div>
 
   <!-- Inline prompt modal (new file/folder/rename) -->
+  <div id="palette-overlay" class="hidden">
+    <div id="palette-box">
+      <input id="palette-input" type="text" placeholder="Search files… (type &gt; for commands)" spellcheck="false" autocomplete="off" />
+      <div id="palette-list"></div>
+      <div id="palette-empty" class="hidden">No matches.</div>
+    </div>
+  </div>
+
   <div id="modal-overlay" class="hidden">
     <div id="modal-box">
       <div id="modal-title">New File</div>
@@ -245,6 +303,7 @@
        itself as an anonymous AMD module through Monaco's loader instead of
        setting window.marked, which is what we actually need. -->
   <script src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../node_modules/dompurify/dist/purify.min.js"></script>
   <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
   <script src="renderer.js"></script>
 </body>

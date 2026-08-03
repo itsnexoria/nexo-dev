@@ -16,6 +16,9 @@ const uiState = {
   fontSize: 13.5,
   minimap: true,
   wordWrap: false,
+  bracketGuides: false,
+  scriptsOrder: [],
+  snippets: [],
   autoSave: false,
   autoSaveDelayMs: 1000,
   defaultSiteInterval: 10,
@@ -273,7 +276,8 @@ function initMonaco(cb) {
       // per-keystroke/scroll cost in Monaco, especially on larger files.
       minimap: { enabled: uiState.minimap, renderCharacters: false, maxColumn: 80 },
       wordWrap: uiState.wordWrap ? 'on' : 'off',
-      bracketPairColorization: { enabled: false },
+      bracketPairColorization: { enabled: uiState.bracketGuides },
+      guides: { indentation: uiState.bracketGuides, bracketPairs: uiState.bracketGuides },
       smoothScrolling: false,
       renderWhitespace: 'selection',
       occurrencesHighlight: 'off',
@@ -284,6 +288,7 @@ function initMonaco(cb) {
 
     editor.onDidChangeCursorPosition((e) => {
       document.getElementById('status-pos').textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
+      saveSessionDebounced();
     });
     addSelectAllAction(editor);
     // Keep our own font-size setting (and Settings page, and prefs.json) in
@@ -300,8 +305,72 @@ function initMonaco(cb) {
       if (fontInput) fontInput.value = newSize;
     });
 
+    registerSnippetProvider();
+    registerBlameHoverProvider();
     cb();
   });
+}
+
+// User-defined snippets (Settings → Snippets). Registered once per language
+// id we support — Monaco has no true wildcard selector, so 'all'-scoped
+// snippets are just filtered into every one of these providers instead.
+function registerSnippetProvider() {
+  const languageIds = [...new Set(Object.values(LANG_MAP))];
+  const provider = {
+    triggerCharacters: [],
+    provideCompletionItems(model, position) {
+      const lang = model.getLanguageId();
+      const list = (uiState.snippets || []).filter((s) => s.language === 'all' || s.language === lang);
+      if (!list.length) return { suggestions: [] };
+      const word = model.getWordUntilPosition(position);
+      const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
+      return {
+        suggestions: list.map((s) => ({
+          label: s.prefix,
+          kind: monaco.languages.CompletionItemKind.Snippet,
+          insertText: s.body,
+          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+          detail: s.description || 'Snippet',
+          documentation: s.body,
+          range,
+          sortText: `0-${s.prefix}`, // float snippets above regular word-based suggestions
+        })),
+      };
+    },
+  };
+  languageIds.forEach((lang) => monaco.languages.registerCompletionItemProvider(lang, provider));
+}
+
+// Inline git blame on hover — one provider registered per language id (same
+// constraint as the snippet provider above, Monaco has no wildcard selector).
+// Looks up which open tab owns the hovered model, then reads that tab's
+// cached blame data rather than fetching per-hover.
+function registerBlameHoverProvider() {
+  const languageIds = [...new Set(Object.values(LANG_MAP))];
+  const provider = {
+    provideHover(model, position) {
+      const tab = state.openTabs.find((t) => t.model === model);
+      if (!tab || !tab.blameLines) return null;
+      const info = tab.blameLines[position.lineNumber];
+      if (!info) return null;
+      if (info.hash === '0000000000000000000000000000000000000000') {
+        return {
+          range: new monaco.Range(position.lineNumber, 1, position.lineNumber, model.getLineMaxColumn(position.lineNumber)),
+          contents: [{ value: '**Uncommitted change**' }],
+        };
+      }
+      const dateStr = info.time ? new Date(info.time * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+      return {
+        range: new monaco.Range(position.lineNumber, 1, position.lineNumber, model.getLineMaxColumn(position.lineNumber)),
+        contents: [
+          { value: `**${info.author}** · ${dateStr}` },
+          { value: info.summary || '' },
+          { value: `\`${info.hash.slice(0, 7)}\`` },
+        ],
+      };
+    },
+  };
+  languageIds.forEach((lang) => monaco.languages.registerHoverProvider(lang, provider));
 }
 
 // Files above this size get minimap + bracket colorization forced off (they're
@@ -315,6 +384,8 @@ function applyPerfOptionsForFile(byteLength) {
     minimap: { enabled: uiState.minimap && !isLarge, renderCharacters: false, maxColumn: 80 },
     folding: !isLarge,
     links: !isLarge,
+    bracketPairColorization: { enabled: uiState.bracketGuides && !isLarge },
+    guides: { indentation: uiState.bracketGuides && !isLarge, bracketPairs: uiState.bracketGuides && !isLarge },
   });
 }
 
@@ -356,6 +427,7 @@ function escapeHtml(str) {
 async function openProject(folder) {
   state.projectRoot = folder;
   state.expanded = new Set([folder]);
+  paletteState.filesCache = null;
   document.getElementById('project-name').textContent = folder.split(/[\\/]/).pop();
   document.getElementById('sidebar-root-name').textContent = folder.split(/[\\/]/).pop().toUpperCase();
   document.getElementById('welcome').style.display = 'none';
@@ -372,6 +444,39 @@ async function openProject(folder) {
   refreshGitStatus();
   const termCwd = document.getElementById('terminal-cwd');
   if (termCwd) termCwd.textContent = `— ${state.projectRoot}`;
+
+  // Crash recovery: if nothing's open yet (fresh launch, or first time this
+  // project is opened this session), silently reopen whatever was open last
+  // time — sessions are saved continuously as tabs change, not just on a
+  // clean exit, specifically so a crash/force-close still leaves something
+  // to restore from.
+  if (!state.openTabs.length) {
+    const session = await window.nexo.loadSession(folder);
+    if (session && session.openTabs && session.openTabs.length) {
+      for (const t of session.openTabs) {
+        const exists = await window.nexo.exists(t.path);
+        if (!exists) continue;
+        await openFile(t.path);
+        const tab = state.openTabs.find((x) => x.path === t.path);
+        if (tab) {
+          tab.pinned = !!t.pinned;
+          if (t.cursor && editor && editor.getModel() === tab.model) {
+            editor.setPosition({ lineNumber: t.cursor.line, column: t.cursor.column });
+            editor.revealPositionInCenter({ lineNumber: t.cursor.line, column: t.cursor.column });
+          } else if (t.cursor) {
+            // Not the active tab right now — stash it so activateTab can apply
+            // it the moment this tab actually gets focus (it has no live
+            // viewState yet since it was never opened this session).
+            tab.pendingCursor = t.cursor;
+          }
+        }
+      }
+      if (session.activeTab && state.openTabs.some((t) => t.path === session.activeTab)) {
+        activateTab(session.activeTab);
+      }
+      renderTabs();
+    }
+  }
 }
 
 // ---------------- OS integration: "Open with Nexo Dev" + drag files in from Windows ----------------
@@ -686,7 +791,7 @@ async function handleTreeDrop(sourcePath, destDir) {
 }
 
 // ---------------- Tabs / Editor ----------------
-async function openFile(filePath) {
+async function openFile(filePath, opts = {}) {
   if (!monacoLoaded) {
     document.getElementById('status-path').textContent = 'Loading editor…';
     await monacoReadyPromise;
@@ -695,8 +800,8 @@ async function openFile(filePath) {
   if (!tab) {
     const res = await window.nexo.readFile(filePath);
     if (!res.ok) {
-      alert(`Could not open file:\n${res.error}`);
-      return;
+      if (!opts.silent) alert(`Could not open file:\n${res.error}`);
+      return false;
     }
     const name = filePath.split(/[\\/]/).pop();
     const lang = langFromName(name);
@@ -713,14 +818,17 @@ async function openFile(filePath) {
       if (t && splitState.visible && splitState.tabPath === filePath && splitState.mdMode === 'preview') {
         renderSplitMarkdownPreview(t);
       }
+      if (t && state.activeTab === filePath) scheduleOutlineRefresh();
+      if (t) scheduleLint(filePath);
     });
     tab = { path: filePath, name, model, modified: false, byteLength: res.content.length, isMarkdown, mdMode: isMarkdown ? 'preview' : null, pinned: false };
     state.openTabs.push(tab);
     if (splitState.visible) updateSplitTabOptions();
     window.nexo.watchFile(filePath);
   }
-  activateTab(filePath);
-  renderTree();
+  if (!opts.skipActivate) activateTab(filePath);
+  if (!opts.silent) renderTree();
+  return true;
 }
 
 function activateTab(filePath) {
@@ -734,6 +842,11 @@ function activateTab(filePath) {
   editor.setModel(tab.model);
   applyPerfOptionsForFile(tab.byteLength || 0);
   if (tab.viewState) editor.restoreViewState(tab.viewState);
+  if (tab.pendingCursor) {
+    editor.setPosition({ lineNumber: tab.pendingCursor.line, column: tab.pendingCursor.column });
+    editor.revealPositionInCenter({ lineNumber: tab.pendingCursor.line, column: tab.pendingCursor.column });
+    delete tab.pendingCursor;
+  }
   document.getElementById('status-path').textContent = filePath;
   document.getElementById('status-lang').textContent = tab.model.getModeId ? tab.model.getModeId() : '';
   renderTabs();
@@ -751,6 +864,9 @@ function activateTab(filePath) {
     editor.focus();
     updateConflictBanner();
   }
+  refreshOutlineIfVisible();
+  lintFile(filePath);
+  refreshBlameForTab(filePath);
 }
 
 let draggedTabPath = null;
@@ -795,6 +911,31 @@ function renderTabs() {
     });
     bar.appendChild(el);
   }
+  saveSessionDebounced();
+}
+
+function captureTabCursor(tab) {
+  if (state.activeTab === tab.path && editor && editor.getModel() === tab.model) {
+    const pos = editor.getPosition();
+    return pos ? { line: pos.lineNumber, column: pos.column } : null;
+  }
+  const cs = tab.viewState && tab.viewState.cursorState;
+  if (cs && cs[0] && cs[0].position) {
+    return { line: cs[0].position.lineNumber, column: cs[0].position.column };
+  }
+  return null;
+}
+
+let sessionSaveTimer = null;
+function saveSessionDebounced() {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    if (!state.projectRoot) return;
+    window.nexo.saveSession(state.projectRoot, {
+      openTabs: state.openTabs.map((t) => ({ path: t.path, pinned: !!t.pinned, cursor: captureTabCursor(t) })),
+      activeTab: state.activeTab,
+    });
+  }, 500);
 }
 
 const closedTabsStack = [];
@@ -852,7 +993,8 @@ function renderMarkdownPreview(tab) {
   const box = document.getElementById('markdown-preview-content');
   try {
     if (window.marked) {
-      box.innerHTML = marked.parse(tab.model.getValue());
+      const raw = marked.parse(tab.model.getValue());
+      box.innerHTML = window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
     } else {
       // Most likely cause: node_modules/marked isn't installed — either the
       // project was set up before "marked" was added to package.json, or
@@ -915,6 +1057,7 @@ function maybeAutoSave(filePath) {
     autoSaveTimers.delete(filePath);
     const tab = state.openTabs.find((t) => t.path === filePath);
     if (!tab || !tab.modified) return;
+    if (scanConflicts(tab.model).length) return; // don't silently persist unresolved conflict markers
     const res = await window.nexo.writeFile(tab.path, tab.model.getValue());
     if (res.ok) {
       tab.modified = false;
@@ -928,16 +1071,26 @@ async function saveActiveTab() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
   if (!tab) return;
+  if (scanConflicts(tab.model).length) {
+    const proceed = confirm('This file still has unresolved merge conflict markers (<<<<<<< / ======= / >>>>>>>).\n\nSave anyway?');
+    if (!proceed) return;
+  }
   const res = await window.nexo.writeFile(tab.path, tab.model.getValue());
   if (!res.ok) { alert(`Could not save file:\n${res.error}`); return; }
   tab.modified = false;
   renderTabs();
+  lintFile(tab.path);
+  refreshBlameForTab(tab.path);
 }
 
 async function saveActiveTabAs() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
   if (!tab) return;
+  if (scanConflicts(tab.model).length) {
+    const proceed = confirm('This file still has unresolved merge conflict markers (<<<<<<< / ======= / >>>>>>>).\n\nSave anyway?');
+    if (!proceed) return;
+  }
   const newPath = await window.nexo.saveAsDialog(tab.name);
   if (!newPath) return;
   const res = await window.nexo.writeFile(newPath, tab.model.getValue());
@@ -953,6 +1106,28 @@ function copyPathsToClipboard(paths, relative) {
     return p.startsWith(state.projectRoot) ? p.slice(state.projectRoot.length + 1) : p;
   }).join('\n');
   navigator.clipboard.writeText(text).catch(() => {});
+}
+
+async function addToGitignore(targetPath, isDir) {
+  if (!state.projectRoot) return;
+  let rel = targetPath.startsWith(state.projectRoot) ? targetPath.slice(state.projectRoot.length + 1) : targetPath;
+  rel = rel.replace(/\\/g, '/');
+  if (isDir) rel += '/';
+  const sep = state.projectRoot.includes('\\') ? '\\' : '/';
+  const gitignorePath = state.projectRoot + sep + '.gitignore';
+  const res = await window.nexo.readFile(gitignorePath);
+  let content = res.ok ? res.content : '';
+  const lines = content.split(/\r?\n/);
+  if (lines.some((l) => l.trim() === rel)) { flashToast(`${rel} is already in .gitignore`); return; }
+  if (content.length && !content.endsWith('\n')) content += '\n';
+  content += rel + '\n';
+  const writeRes = await window.nexo.writeFile(gitignorePath, content);
+  if (!writeRes.ok) { flashToast(`Could not update .gitignore: ${writeRes.error || 'unknown error'}`); return; }
+  flashToast(`Added ${rel} to .gitignore`);
+  const tab = state.openTabs.find((t) => t.path === gitignorePath);
+  if (tab) tab.model.setValue(content);
+  if (document.getElementById('panel-git').classList.contains('active')) refreshGitStatus();
+  renderTree();
 }
 
 async function confirmBulkDelete(paths) {
@@ -990,6 +1165,7 @@ function showContextMenu(x, y, isDirectory) {
     if (state.contextTarget.path !== state.projectRoot) {
       items.push({ label: 'Rename', action: () => promptRename(state.contextTarget.path) });
       items.push({ label: 'Reveal in Explorer', action: () => window.nexo.revealInFolder(state.contextTarget.path) });
+      items.push({ label: 'Add to .gitignore', action: () => addToGitignore(state.contextTarget.path, isDirectory) });
       items.push({ sep: true });
       items.push({ label: 'Delete', danger: true, action: () => confirmDelete(state.contextTarget.path, isDirectory) });
     } else {
@@ -1174,7 +1350,8 @@ function ensureSplitEditor() {
     model: null,
     minimap: { enabled: uiState.minimap, renderCharacters: false, maxColumn: 80 },
     wordWrap: uiState.wordWrap ? 'on' : 'off',
-    bracketPairColorization: { enabled: false },
+    bracketPairColorization: { enabled: uiState.bracketGuides },
+    guides: { indentation: uiState.bracketGuides, bracketPairs: uiState.bracketGuides },
     smoothScrolling: false,
     renderWhitespace: 'selection',
     occurrencesHighlight: 'off',
@@ -1200,7 +1377,12 @@ function updateSplitTabOptions() {
 function renderSplitMarkdownPreview(tab) {
   const box = document.getElementById('split-markdown-preview-content');
   try {
-    box.innerHTML = window.marked ? marked.parse(tab.model.getValue()) : '<p>Markdown renderer not available. Run <code>npm install</code> and restart.</p>';
+    if (window.marked) {
+      const raw = marked.parse(tab.model.getValue());
+      box.innerHTML = window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
+    } else {
+      box.innerHTML = '<p>Markdown renderer not available. Run <code>npm install</code> and restart.</p>';
+    }
   } catch (err) {
     box.innerHTML = `<p>Could not render markdown: ${escapeHtml(err.message)}</p>`;
   }
@@ -1312,19 +1494,198 @@ document.getElementById('btn-toggle-split').addEventListener('click', toggleSpli
   window.addEventListener('mouseup', () => { dragging = false; document.body.style.cursor = ''; if (editor) editor.layout(); });
 })();
 
-const termState = { activeRunId: null, history: [], historyIdx: -1 };
+// ---------------- Multiple terminal sessions ----------------
+let terminals = [];
+let activeTerminalId = null;
+let nextTerminalNum = 1;
 
-function termAppend(text, cls) {
-  const out = document.getElementById('terminal-output');
+function createTerminalSession() {
+  const id = 'term-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  const outputEl = document.createElement('div');
+  outputEl.className = 'term-session-output';
+  document.getElementById('terminal-output').appendChild(outputEl);
+  const session = {
+    id,
+    title: `Terminal ${nextTerminalNum++}`,
+    activeRunId: null,
+    runningScript: null,
+    history: [],
+    historyIdx: -1,
+    ansiBuffer: '',
+    ansiState: { fg: null, bg: null, bold: false, italic: false, underline: false },
+    outputEl,
+  };
+  terminals.push(session);
+  return session;
+}
+
+function getActiveTerminal() {
+  return terminals.find((t) => t.id === activeTerminalId) || null;
+}
+
+function findTerminalByRunId(id) {
+  return terminals.find((t) => t.activeRunId === id) || null;
+}
+
+function switchTerminalTab(id) {
+  activeTerminalId = id;
+  terminals.forEach((t) => t.outputEl.classList.toggle('active', t.id === id));
+  renderTerminalTabs();
+  const t = getActiveTerminal();
+  document.getElementById('term-run-btn').textContent = t && t.activeRunId ? 'Stop' : 'Run';
+  document.getElementById('terminal-input').focus();
+}
+
+function closeTerminalTab(id) {
+  const t = terminals.find((x) => x.id === id);
+  if (!t) return;
+  if (t.activeRunId) window.nexo.killCommand(t.activeRunId);
+  t.outputEl.remove();
+  terminals = terminals.filter((x) => x.id !== id);
+  if (activeTerminalId === id) {
+    const next = terminals[terminals.length - 1];
+    if (next) switchTerminalTab(next.id);
+    else { activeTerminalId = null; ensureTerminalSession(); }
+  } else {
+    renderTerminalTabs();
+  }
+}
+
+function ensureTerminalSession() {
+  if (!terminals.length) {
+    const t = createTerminalSession();
+    switchTerminalTab(t.id);
+  } else if (!activeTerminalId) {
+    switchTerminalTab(terminals[0].id);
+  }
+}
+
+function renderTerminalTabs() {
+  const bar = document.getElementById('terminal-tabs');
+  bar.innerHTML = '';
+  terminals.forEach((t) => {
+    const el = document.createElement('div');
+    el.className = 'term-tab' + (t.id === activeTerminalId ? ' active' : '') + (t.activeRunId ? ' running' : '');
+    el.innerHTML = `<span class="term-tab-dot"></span><span class="term-tab-name">${escapeHtml(t.title)}</span><span class="term-tab-close" title="Close">✕</span>`;
+    el.addEventListener('click', (e) => {
+      if (e.target.classList.contains('term-tab-close')) { closeTerminalTab(t.id); return; }
+      switchTerminalTab(t.id);
+    });
+    bar.appendChild(el);
+  });
+  const addBtn = document.createElement('button');
+  addBtn.className = 'term-tab-add';
+  addBtn.title = 'New Terminal';
+  addBtn.textContent = '+';
+  addBtn.addEventListener('click', () => { const t = createTerminalSession(); switchTerminalTab(t.id); });
+  bar.appendChild(addBtn);
+}
+
+function termAppend(session, text, cls) {
   const span = document.createElement('span');
   if (cls) span.className = cls;
   span.textContent = text;
-  out.appendChild(span);
-  out.scrollTop = out.scrollHeight;
+  session.outputEl.appendChild(span);
+  session.outputEl.scrollTop = session.outputEl.scrollHeight;
 }
 
-function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+// ---------------- ANSI color rendering ----------------
+const ANSI_PALETTE = {
+  30: '#1c1c22', 31: '#f0526b', 32: '#3ecf8e', 33: '#e6b83c', 34: '#3b82f6', 35: '#c084fc', 36: '#22d3ee', 37: '#d4d4d8',
+  90: '#6e6e78', 91: '#ff7a90', 92: '#6ee7a8', 93: '#f2cc6b', 94: '#60a5fa', 95: '#d8b4fe', 96: '#67e8f9', 97: '#f5f5f7',
+};
+function ansi256ToHex(n) {
+  if (n < 16) {
+    const base = [
+      '#1c1c22', '#f0526b', '#3ecf8e', '#e6b83c', '#3b82f6', '#c084fc', '#22d3ee', '#d4d4d8',
+      '#6e6e78', '#ff7a90', '#6ee7a8', '#f2cc6b', '#60a5fa', '#d8b4fe', '#67e8f9', '#f5f5f7',
+    ];
+    return base[n];
+  }
+  if (n <= 231) {
+    const i = n - 16;
+    const level = (v) => (v === 0 ? 0 : 55 + v * 40);
+    return rgbToHex({ r: level(Math.floor(i / 36)), g: level(Math.floor((i % 36) / 6)), b: level(i % 6) });
+  }
+  const gray = 8 + (n - 232) * 10;
+  return rgbToHex({ r: gray, g: gray, b: gray });
+}
+
+function resetAnsiState(session) {
+  session.ansiBuffer = '';
+  session.ansiState = { fg: null, bg: null, bold: false, italic: false, underline: false };
+}
+
+function applySgrCodes(session, codes) {
+  const s = session.ansiState;
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i];
+    if (code === 0) { session.ansiState = { fg: null, bg: null, bold: false, italic: false, underline: false }; }
+    else if (code === 1) s.bold = true;
+    else if (code === 3) s.italic = true;
+    else if (code === 4) s.underline = true;
+    else if (code === 22) s.bold = false;
+    else if (code === 23) s.italic = false;
+    else if (code === 24) s.underline = false;
+    else if (code === 39) s.fg = null;
+    else if (code === 49) s.bg = null;
+    else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) s.fg = ANSI_PALETTE[code];
+    else if (code >= 40 && code <= 47) s.bg = ANSI_PALETTE[code - 10];
+    else if (code >= 100 && code <= 107) s.bg = ANSI_PALETTE[code - 10];
+    else if (code === 38 || code === 48) {
+      const target = code === 38 ? 'fg' : 'bg';
+      const mode = codes[i + 1];
+      if (mode === 5) { s[target] = ansi256ToHex(codes[i + 2]); i += 2; }
+      else if (mode === 2) { s[target] = rgbToHex({ r: codes[i + 2], g: codes[i + 3], b: codes[i + 4] }); i += 4; }
+    }
+  }
+}
+
+function appendAnsiText(session, frag, str) {
+  if (!str) return;
+  const s = session.ansiState;
+  const span = document.createElement('span');
+  const styleParts = [];
+  if (s.fg) styleParts.push(`color:${s.fg}`);
+  if (s.bg) styleParts.push(`background-color:${s.bg}`);
+  if (s.bold) styleParts.push('font-weight:700');
+  if (s.italic) styleParts.push('font-style:italic');
+  if (s.underline) styleParts.push('text-decoration:underline');
+  if (styleParts.length) span.setAttribute('style', styleParts.join(';'));
+  span.textContent = str;
+  frag.appendChild(span);
+}
+
+// Process output be terminal-style ANSI (colors, bold, etc.) instead of the
+// raw escape codes. Process output can split a sequence — or a line —
+// across multiple data chunks, so an incomplete trailing escape sequence is
+// held back and prepended to the next chunk rather than dropped/garbled.
+function termAppendAnsi(session, chunk) {
+  let text = session.ansiBuffer + chunk;
+  session.ansiBuffer = '';
+  const incomplete = text.match(/\x1b\[[0-9;]*$/);
+  if (incomplete) {
+    session.ansiBuffer = incomplete[0];
+    text = text.slice(0, -session.ansiBuffer.length);
+  }
+
+  const frag = document.createDocumentFragment();
+  const re = /\x1b\[([0-9;]*)([a-zA-Z])/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = re.exec(text))) {
+    if (match.index > lastIndex) appendAnsiText(session, frag, text.slice(lastIndex, match.index));
+    if (match[2] === 'm') {
+      const codes = match[1].length ? match[1].split(';').map((c) => (c === '' ? 0 : parseInt(c, 10))) : [0];
+      applySgrCodes(session, codes);
+    }
+    // Non-color codes (cursor movement, clear line, etc.) are silently dropped —
+    // there's no real terminal cursor here, just an append-only log.
+    lastIndex = re.lastIndex;
+  }
+  if (lastIndex < text.length) appendAnsiText(session, frag, text.slice(lastIndex));
+  session.outputEl.appendChild(frag);
+  session.outputEl.scrollTop = session.outputEl.scrollHeight;
 }
 
 function toggleTerminal(forceShow) {
@@ -1332,7 +1693,10 @@ function toggleTerminal(forceShow) {
   const show = forceShow !== undefined ? forceShow : !panel.classList.contains('active');
   panel.classList.toggle('active', show);
   document.getElementById('terminal-cwd').textContent = state.projectRoot ? `— ${state.projectRoot}` : '';
-  if (show) document.getElementById('terminal-input').focus();
+  if (show) {
+    ensureTerminalSession();
+    document.getElementById('terminal-input').focus();
+  }
   if (editor) editor.layout();
 }
 
@@ -1348,64 +1712,79 @@ async function runTerminalCommand() {
   const input = document.getElementById('terminal-input');
   const cmd = input.value.trim();
   if (!cmd) return;
-  if (!state.projectRoot) { termAppend('Open a folder first — commands run in the project root.\n', 'term-err'); return; }
-  if (termState.activeRunId) return; // one command at a time; use Stop first
+  const t = getActiveTerminal();
+  if (!t) return;
+  if (!state.projectRoot) { termAppend(t, 'Open a folder first — commands run in the project root.\n', 'term-err'); return; }
+  if (t.activeRunId) return; // one command at a time per tab; use Stop first, or open another tab
 
-  termState.history.push(cmd);
-  termState.historyIdx = termState.history.length;
-  termAppend(`\n$ ${cmd}\n`, 'term-cmd');
+  t.history.push(cmd);
+  t.historyIdx = t.history.length;
+  resetAnsiState(t);
+  termAppend(t, `\n$ ${cmd}\n`, 'term-cmd');
   input.value = '';
 
-  const runBtn = document.getElementById('term-run-btn');
   const res = await window.nexo.runCommand(state.projectRoot, cmd);
   if (!res.id) {
-    termAppend(`[error] ${res.error || 'Could not start command.'}\n`, 'term-err');
+    termAppend(t, `[error] ${res.error || 'Could not start command.'}\n`, 'term-err');
     return;
   }
-  termState.activeRunId = res.id;
-  runBtn.textContent = 'Stop';
+  t.activeRunId = res.id;
+  if (t.id === activeTerminalId) document.getElementById('term-run-btn').textContent = 'Stop';
+  renderTerminalTabs();
 }
 
 async function stopTerminalCommand() {
-  if (!termState.activeRunId) return;
-  await window.nexo.killCommand(termState.activeRunId);
+  const t = getActiveTerminal();
+  if (!t || !t.activeRunId) return;
+  await window.nexo.killCommand(t.activeRunId);
 }
 
 window.nexo.onTermData((id, chunk) => {
-  if (id !== termState.activeRunId) return;
-  termAppend(stripAnsi(chunk));
+  const t = findTerminalByRunId(id);
+  if (!t) return;
+  termAppendAnsi(t, chunk);
 });
 window.nexo.onTermExit((id, code) => {
-  if (id !== termState.activeRunId) return;
-  termAppend(`[exited with code ${code}]\n`, 'term-exit');
-  termState.activeRunId = null;
-  document.getElementById('term-run-btn').textContent = 'Run';
+  const t = findTerminalByRunId(id);
+  if (!t) return;
+  termAppend(t, `[exited with code ${code}]\n`, 'term-exit');
+  t.activeRunId = null;
+  t.runningScript = null;
+  if (t.id === activeTerminalId) document.getElementById('term-run-btn').textContent = 'Run';
+  renderTerminalTabs();
+  renderScriptsPanel();
 });
 
 document.getElementById('term-run-btn').addEventListener('click', () => {
-  if (termState.activeRunId) stopTerminalCommand();
+  const t = getActiveTerminal();
+  if (t && t.activeRunId) stopTerminalCommand();
   else runTerminalCommand();
 });
 document.getElementById('terminal-input').addEventListener('keydown', (e) => {
+  const t = getActiveTerminal();
+  if (!t) return;
   if (e.key === 'Enter') { e.preventDefault(); runTerminalCommand(); return; }
   if (e.key === 'ArrowUp') {
-    if (termState.historyIdx > 0) { termState.historyIdx--; e.target.value = termState.history[termState.historyIdx]; }
+    if (t.historyIdx > 0) { t.historyIdx--; e.target.value = t.history[t.historyIdx]; }
     e.preventDefault();
     return;
   }
   if (e.key === 'ArrowDown') {
-    if (termState.historyIdx < termState.history.length - 1) {
-      termState.historyIdx++;
-      e.target.value = termState.history[termState.historyIdx];
+    if (t.historyIdx < t.history.length - 1) {
+      t.historyIdx++;
+      e.target.value = t.history[t.historyIdx];
     } else {
-      termState.historyIdx = termState.history.length;
+      t.historyIdx = t.history.length;
       e.target.value = '';
     }
     e.preventDefault();
   }
 });
 document.getElementById('term-clear').addEventListener('click', () => {
-  document.getElementById('terminal-output').innerHTML = '';
+  const t = getActiveTerminal();
+  if (!t) return;
+  t.outputEl.innerHTML = '';
+  resetAnsiState(t);
 });
 document.getElementById('term-close').addEventListener('click', () => toggleTerminal(false));
 document.getElementById('btn-toggle-terminal').addEventListener('click', () => toggleTerminal());
@@ -1437,9 +1816,75 @@ function handleNewFile() {
   promptNewFile(state.projectRoot);
 }
 
+function handleCloneRepo() {
+  showModal({
+    title: 'Clone Repository',
+    fields: [{ id: 'url', placeholder: 'https://github.com/user/repo.git' }],
+    confirmLabel: 'Next',
+    onConfirm: ({ url }) => {
+      // Deferred so the destination-folder dialog doesn't pop up stacked on
+      // top of this modal while it's still closing.
+      setTimeout(() => continueCloneFlow(url.trim()), 50);
+      return null;
+    },
+  });
+}
+
+async function continueCloneFlow(url) {
+  if (openInProgress) return;
+  const parent = await window.nexo.pickFolder('Choose where to clone this repository');
+  if (!parent) return;
+  openInProgress = true;
+  showUpdateToast('Cloning repository…', []);
+  try {
+    const res = await window.nexo.cloneRepo(url, parent);
+    hideUpdateToast();
+    if (!res.ok) { alert(`Clone failed:\n${res.error}`); return; }
+    await openProject(res.path);
+  } finally {
+    openInProgress = false;
+  }
+}
+
 document.getElementById('btn-open-folder').addEventListener('click', handleOpenFolder);
 document.getElementById('welcome-open').addEventListener('click', handleOpenFolder);
 document.getElementById('welcome-new').addEventListener('click', handleNewProject);
+document.getElementById('welcome-clone').addEventListener('click', handleCloneRepo);
+document.getElementById('welcome-github-repos').addEventListener('click', openGithubRepoPicker);
+
+function openGithubRepoPicker() {
+  paletteState.githubRepos = null; // force a fresh fetch each time
+  openPalette('github-repos');
+}
+
+function handleCreateGithubRepo() {
+  window.nexo.hasGithubToken().then((status) => {
+    if (!status.hasToken) { alert('Connect a GitHub token in Settings first.'); return; }
+    showModal({
+      title: 'Create GitHub Repository',
+      fields: [
+        { id: 'name', placeholder: 'my-new-repo' },
+        { id: 'description', placeholder: 'Description (optional)', required: false },
+      ],
+      confirmLabel: 'Next',
+      onConfirm: ({ name, description }) => {
+        if (!name.trim()) return 'Repository name is required.';
+        setTimeout(() => continueCreateGithubRepoFlow(name.trim(), description.trim()), 50);
+        return null;
+      },
+    });
+  });
+}
+
+async function continueCreateGithubRepoFlow(name, description) {
+  const isPrivate = confirm('Make this repository private?\n\nOK = private, Cancel = public');
+  showUpdateToast('Creating repository…', []);
+  const res = await window.nexo.createGithubRepo({ name, description, isPrivate });
+  hideUpdateToast();
+  if (!res.ok) { alert(`Could not create repository:\n${res.error}`); return; }
+  const cloneNow = confirm(`Created ${res.repo.fullName} on GitHub.\n\nClone it locally now?`);
+  if (cloneNow) continueCloneFlow(res.repo.cloneUrl);
+}
 document.getElementById('btn-new-file').addEventListener('click', handleNewFile);
 document.getElementById('btn-add-file').addEventListener('click', () => state.projectRoot && promptNewFile(state.projectRoot));
 document.getElementById('btn-add-folder').addEventListener('click', () => state.projectRoot && promptNewFolder(state.projectRoot));
@@ -1468,6 +1913,8 @@ document.addEventListener('keydown', (e) => {
   if (ctrl && e.key === '-') { e.preventDefault(); changeFontSize(-1); }
   if (ctrl && e.key === '0') { e.preventDefault(); resetFontSize(); }
   if (ctrl && e.shiftKey && e.key.toLowerCase() === 't') { e.preventDefault(); reopenClosedTab(); }
+  if (ctrl && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openPalette('files'); }
+  if (ctrl && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openPalette('commands'); }
   if (e.key === 'Escape' && document.body.classList.contains('zen-mode')) { toggleZenMode(false); }
   if (ctrl && e.key.toLowerCase() === 'b') {
     e.preventDefault();
@@ -1536,6 +1983,13 @@ function showUpdateToast(text, actions) {
   toast.classList.remove('hidden');
 }
 function hideUpdateToast() { document.getElementById('update-toast').classList.add('hidden'); }
+
+let flashToastTimer = null;
+function flashToast(text) {
+  showUpdateToast(text, [{ label: 'Dismiss', onClick: hideUpdateToast }]);
+  clearTimeout(flashToastTimer);
+  flashToastTimer = setTimeout(hideUpdateToast, 4000);
+}
 
 if (window.nexo.onUpdateAvailable) {
   window.nexo.onUpdateAvailable((version) => {
@@ -1815,6 +2269,23 @@ document.getElementById('sites-welcome-add').addEventListener('click', addSiteFl
 
 // ---------------- Global search ----------------
 let searchDebounceTimer = null;
+function validateSearchRegex() {
+  const useRegex = document.getElementById('search-regex').checked;
+  const errBox = document.getElementById('search-regex-error');
+  if (!useRegex) { errBox.classList.add('hidden'); return true; }
+  const query = document.getElementById('search-input').value;
+  if (!query) { errBox.classList.add('hidden'); return true; }
+  try {
+    new RegExp(query);
+    errBox.classList.add('hidden');
+    return true;
+  } catch (err) {
+    errBox.textContent = `Invalid regex: ${err.message}`;
+    errBox.classList.remove('hidden');
+    return false;
+  }
+}
+
 async function runSearch() {
   const query = document.getElementById('search-input').value;
   const summary = document.getElementById('search-summary');
@@ -1829,9 +2300,23 @@ async function runSearch() {
     results.innerHTML = '';
     return;
   }
+  if (!validateSearchRegex()) {
+    summary.textContent = '';
+    results.innerHTML = '';
+    return;
+  }
   summary.textContent = 'Searching…';
   const caseSensitive = document.getElementById('search-case').checked;
-  const res = await window.nexo.searchText(state.projectRoot, query, { caseSensitive });
+  const useRegex = document.getElementById('search-regex').checked;
+  const res = await window.nexo.searchText(state.projectRoot, query, { caseSensitive, useRegex });
+  if (res.error) {
+    summary.textContent = '';
+    results.innerHTML = '';
+    const errBox = document.getElementById('search-regex-error');
+    errBox.textContent = `Invalid regex: ${res.error}`;
+    errBox.classList.remove('hidden');
+    return;
+  }
   renderSearchResults(res, query);
 }
 
@@ -1885,10 +2370,70 @@ function renderSearchResults(res, query) {
 }
 
 document.getElementById('search-input').addEventListener('input', () => {
+  validateSearchRegex();
   clearTimeout(searchDebounceTimer);
   searchDebounceTimer = setTimeout(runSearch, 300);
 });
 document.getElementById('search-case').addEventListener('change', runSearch);
+document.getElementById('search-regex').addEventListener('change', () => { validateSearchRegex(); runSearch(); });
+
+document.getElementById('btn-toggle-replace').addEventListener('click', (e) => {
+  const row = document.getElementById('replace-row');
+  const show = row.classList.contains('hidden');
+  row.classList.toggle('hidden', !show);
+  e.currentTarget.classList.toggle('on', show);
+  if (show) document.getElementById('replace-input').focus();
+});
+
+document.getElementById('btn-replace-all').addEventListener('click', async () => {
+  const query = document.getElementById('search-input').value;
+  const replacement = document.getElementById('replace-input').value;
+  if (!query.trim()) return;
+  if (!state.projectRoot) { alert('Open a folder first.'); return; }
+  if (!validateSearchRegex()) return;
+  const caseSensitive = document.getElementById('search-case').checked;
+  const useRegex = document.getElementById('search-regex').checked;
+
+  const ok = confirm(`Replace all occurrences of "${query}" with "${replacement}" across the project?\n\nThis rewrites matching files directly — it cannot be undone by this app (though your own version control can still help if the project is a git repo).`);
+  if (!ok) return;
+
+  const btn = document.getElementById('btn-replace-all');
+  btn.disabled = true;
+  btn.textContent = 'Replacing…';
+  const res = await window.nexo.replaceAll(state.projectRoot, query, replacement, { caseSensitive, useRegex });
+  btn.disabled = false;
+  btn.textContent = 'Replace All';
+
+  if (res.errors.length && res.filesChanged === 0 && res.totalReplacements === 0 && res.errors[0].path === '') {
+    const errBox = document.getElementById('search-regex-error');
+    errBox.textContent = res.errors[0].error;
+    errBox.classList.remove('hidden');
+    return;
+  }
+
+  document.getElementById('search-summary').textContent =
+    `Replaced ${res.totalReplacements} occurrence${res.totalReplacements === 1 ? '' : 's'} in ${res.filesChanged} file${res.filesChanged === 1 ? '' : 's'}` +
+    (res.errors.length ? ` (${res.errors.length} failed)` : '');
+  document.getElementById('search-results').innerHTML = '';
+
+  // Any changed files that happen to be open need their editor content
+  // refreshed — reuse the same silent-reload path as external file changes,
+  // since that's exactly what this is (the disk content just changed).
+  for (const p of res.changedPaths) {
+    const tab = state.openTabs.find((t) => t.path === p);
+    if (!tab) continue;
+    const fresh = await window.nexo.readFile(p);
+    if (!fresh.ok) continue;
+    const isActiveModel = editor && editor.getModel() === tab.model;
+    const viewState = isActiveModel ? editor.saveViewState() : null;
+    tab.model.setValue(fresh.content);
+    tab.byteLength = fresh.content.length;
+    tab.modified = false;
+    if (isActiveModel && viewState) editor.restoreViewState(viewState);
+    if (tab.isMarkdown && tab.mdMode === 'preview') renderMarkdownPreview(tab);
+  }
+  if (res.changedPaths.length) renderTabs();
+});
 
 // ---------------- Git / Source Control ----------------
 const gitState = { root: null, staged: [], unstaged: [], conflicts: [], available: false, activePath: null, activeStaged: false, activeCommit: null, subtab: 'changes', ignoredPaths: new Set() };
@@ -1911,7 +2456,9 @@ function gitDecorationFor(fullPath) {
   return { letter: gitBadgeChar(entry.status), cls };
 }
 
+let gitStatusToken = 0;
 async function refreshGitStatus() {
+  const myToken = ++gitStatusToken;
   const branchLabel = document.getElementById('git-branch-current');
   const pushBtn = document.getElementById('git-push-btn');
   const pullBtn = document.getElementById('git-pull-btn');
@@ -1925,6 +2472,7 @@ async function refreshGitStatus() {
     return;
   }
   const res = await window.nexo.gitStatus(state.projectRoot);
+  if (myToken !== gitStatusToken) return; // a newer refresh started while this one was in flight — discard
   if (!res.ok) {
     gitState.available = false;
     gitState.ignoredPaths = new Set();
@@ -1984,7 +2532,9 @@ async function gitPushFlow() {
   const btn = document.getElementById('git-push-btn');
   btn.disabled = true;
   btn.textContent = '⬆ Pushing…';
+  const stillWorkingTimer = setTimeout(() => { btn.textContent = '⬆ Still working…'; }, 5000);
   const res = await window.nexo.gitPush(state.projectRoot);
+  clearTimeout(stillWorkingTimer);
   btn.textContent = '⬆ Push';
   btn.disabled = false;
   if (!res.ok) { alert(`Push failed:\n${res.error}`); return; }
@@ -1995,7 +2545,9 @@ async function gitPullFlow() {
   const btn = document.getElementById('git-pull-btn');
   btn.disabled = true;
   btn.textContent = '⬇ Pulling…';
+  const stillWorkingTimer = setTimeout(() => { btn.textContent = '⬇ Still working…'; }, 5000);
   const res = await window.nexo.gitPull(state.projectRoot);
+  clearTimeout(stillWorkingTimer);
   btn.textContent = '⬇ Pull';
   btn.disabled = false;
   if (!res.ok) { alert(`Pull failed:\n${res.error}`); return; }
@@ -2067,12 +2619,13 @@ function renderGitPanel() {
   commitBox.id = 'git-commit-box';
   commitBox.innerHTML = `
     <textarea id="git-commit-msg" placeholder="Commit message…"></textarea>
-    <button id="git-commit-btn" ${gitState.staged.length ? '' : 'disabled'}>Commit ${gitState.staged.length ? `(${gitState.staged.length})` : ''}</button>
+    <button id="git-commit-btn" ${gitState.staged.length ? '' : 'disabled title="Stage at least one file to enable committing"'}>Commit ${gitState.staged.length ? `(${gitState.staged.length})` : ''}</button>
   `;
   body.appendChild(commitBox);
   document.getElementById('git-commit-btn').addEventListener('click', async () => {
-    const msg = document.getElementById('git-commit-msg').value.trim();
-    if (!msg) return;
+    const msgBox = document.getElementById('git-commit-msg');
+    const msg = msgBox.value.trim();
+    if (!msg) { msgBox.focus(); msgBox.classList.add('shake'); setTimeout(() => msgBox.classList.remove('shake'), 400); return; }
     const res = await window.nexo.gitCommit(state.projectRoot, msg);
     if (!res.ok) { alert(`Commit failed:\n${res.error}`); return; }
     hideDiff();
@@ -2195,7 +2748,8 @@ function renderGitFileRow(entry, staged) {
     unstageBtn.title = 'Unstage';
     unstageBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await window.nexo.gitUnstage(state.projectRoot, entry.path);
+      const res = await window.nexo.gitUnstage(state.projectRoot, entry.path);
+      if (!res.ok) { alert(`Could not unstage "${entry.path}":\n${res.error || 'unknown error'}`); }
       refreshGitStatus();
     });
     actions.appendChild(unstageBtn);
@@ -2206,7 +2760,8 @@ function renderGitFileRow(entry, staged) {
     stageBtn.title = 'Stage';
     stageBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await window.nexo.gitStage(state.projectRoot, entry.path);
+      const res = await window.nexo.gitStage(state.projectRoot, entry.path);
+      if (!res.ok) { alert(`Could not stage "${entry.path}":\n${res.error || 'unknown error'}`); }
       refreshGitStatus();
     });
     actions.appendChild(stageBtn);
@@ -2219,7 +2774,8 @@ function renderGitFileRow(entry, staged) {
       discardBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm(`Discard changes to "${entry.path}"? This cannot be undone.`)) return;
-        await window.nexo.gitDiscard(state.projectRoot, entry.path);
+        const res = await window.nexo.gitDiscard(state.projectRoot, entry.path);
+        if (!res.ok) { alert(`Could not discard changes to "${entry.path}":\n${res.error || 'unknown error'}`); }
         refreshGitStatus();
       });
       actions.appendChild(discardBtn);
@@ -2245,7 +2801,8 @@ function renderConflictRow(entry) {
   resolveBtn.title = 'Mark resolved (stages the file)';
   resolveBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    await window.nexo.gitStage(state.projectRoot, entry.path);
+    const res = await window.nexo.gitStage(state.projectRoot, entry.path);
+    if (!res.ok) { alert(`Could not mark "${entry.path}" resolved:\n${res.error || 'unknown error'}`); }
     refreshGitStatus();
   });
   actions.appendChild(resolveBtn);
@@ -2479,6 +3036,9 @@ function switchRailView(view) {
   if (editor) editor.layout();
   if (view === 'search') document.getElementById('search-input').focus();
   if (view === 'git') refreshGitStatus();
+  if (view === 'scripts') loadScripts();
+  if (view === 'outline') renderOutlinePanel();
+  if (view === 'github') loadGithubPanel();
 }
 
 document.querySelectorAll('.rail-btn').forEach((btn) => {
@@ -2574,6 +3134,13 @@ function renderSettingsPage() {
         </div>
         <div class="settings-control"><div class="settings-toggle ${uiState.wordWrap ? 'on' : ''}" id="set-word-wrap"></div></div>
       </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Bracket pair colorization &amp; indent guides</div>
+          <div class="settings-row-desc">Color-matches bracket pairs and shows indent guide lines. Off by default — it's one of the pricier Monaco features on large files.</div>
+        </div>
+        <div class="settings-control"><div class="settings-toggle ${uiState.bracketGuides ? 'on' : ''}" id="set-bracket-guides"></div></div>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -2597,6 +3164,34 @@ function renderSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h2>Snippets</h2>
+      <div class="settings-row-desc" style="margin-bottom:10px;">Text expansions available in the editor's autocomplete. Type the prefix and accept the suggestion to expand it. Use <code>$1</code>, <code>$2</code>, <code>\${1:default}</code> for tab stops and <code>$0</code> for the final cursor position.</div>
+      <div id="snippets-list"></div>
+      <button class="tbtn" id="snippets-add-btn">+ Add Snippet</button>
+      <div id="snippet-form" class="hidden">
+        <div class="snippet-form-row">
+          <input type="text" class="settings-text" id="snippet-prefix" placeholder="Prefix (e.g. clg)" spellcheck="false" autocomplete="off" />
+          <select class="settings-select" id="snippet-language">
+            <option value="all">All languages</option>
+            <option value="javascript">JavaScript</option>
+            <option value="typescript">TypeScript</option>
+            <option value="python">Python</option>
+            <option value="html">HTML</option>
+            <option value="css">CSS</option>
+            <option value="json">JSON</option>
+            <option value="markdown">Markdown</option>
+          </select>
+        </div>
+        <input type="text" class="settings-text" id="snippet-description" placeholder="Description (optional)" style="width:100%; margin-top:8px;" />
+        <textarea id="snippet-body" placeholder="console.log($1);$0" spellcheck="false"></textarea>
+        <div class="snippet-form-actions">
+          <button class="tbtn" id="snippet-cancel-btn">Cancel</button>
+          <button class="tbtn primary" id="snippet-save-btn">Save Snippet</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h2>Sites Monitor</h2>
       <div class="settings-row">
         <div>
@@ -2615,6 +3210,17 @@ function renderSettingsPage() {
           <div class="settings-row-desc">Optional. Overrides the default shell (Command Prompt on Windows) used by the Terminal panel — e.g. a path to PowerShell or Git Bash. Leave blank to use the system default.</div>
         </div>
         <div class="settings-control"><input type="text" class="settings-text" id="set-custom-shell" placeholder="e.g. powershell.exe" value="${escapeHtml(uiState.customShell || '')}" /></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h2>GitHub</h2>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Personal Access Token</div>
+          <div class="settings-row-desc">Powers push/pull without credential prompts, browsing &amp; cloning your repos, creating new repos, and viewing open PRs &amp; issues for the current project. Stored encrypted via your OS keychain — never leaves this device except to talk to api.github.com. Needs the <code>repo</code> scope. <a href="https://github.com/settings/tokens/new" id="gh-token-help">Create one on GitHub →</a></div>
+        </div>
+        <div class="settings-control" id="gh-token-control"></div>
       </div>
     </div>
 
@@ -2717,6 +3323,17 @@ function renderSettingsPage() {
     window.nexo.setPrefs({ wordWrap: uiState.wordWrap });
   });
 
+  const bracketGuidesToggle = document.getElementById('set-bracket-guides');
+  bracketGuidesToggle.addEventListener('click', () => {
+    uiState.bracketGuides = !uiState.bracketGuides;
+    bracketGuidesToggle.classList.toggle('on', uiState.bracketGuides);
+    applyEditorOptionToBoth({
+      bracketPairColorization: { enabled: uiState.bracketGuides },
+      guides: { indentation: uiState.bracketGuides, bracketPairs: uiState.bracketGuides },
+    });
+    window.nexo.setPrefs({ bracketGuides: uiState.bracketGuides });
+  });
+
   const autoSaveToggle = document.getElementById('set-autosave');
   autoSaveToggle.addEventListener('click', () => {
     uiState.autoSave = !uiState.autoSave;
@@ -2740,6 +3357,155 @@ function renderSettingsPage() {
   document.getElementById('set-custom-shell').addEventListener('change', (e) => {
     uiState.customShell = e.target.value.trim();
     window.nexo.setPrefs({ customShell: uiState.customShell });
+  });
+
+  document.getElementById('gh-token-help').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.nexo.openExternal(e.currentTarget.href);
+  });
+  renderGithubSettingsControl();
+  renderSnippetsList();
+  wireSnippetForm();
+}
+
+async function renderGithubSettingsControl() {
+  const box = document.getElementById('gh-token-control');
+  if (!box) return;
+  box.innerHTML = '<span class="settings-row-desc">Checking…</span>';
+  const status = await window.nexo.hasGithubToken();
+  if (status.hasToken) {
+    const res = await window.nexo.getGithubUser();
+    if (res.ok) {
+      box.innerHTML = `
+        <div class="gh-connected">
+          <span class="gh-connected-user">✓ Connected as <strong>${escapeHtml(res.user.login)}</strong></span>
+          <button class="tbtn" id="gh-disconnect-btn">Disconnect</button>
+        </div>`;
+      document.getElementById('gh-disconnect-btn').addEventListener('click', async () => {
+        await window.nexo.clearGithubToken();
+        renderGithubSettingsControl();
+      });
+      return;
+    }
+    // Saved token exists but GitHub no longer accepts it (expired/revoked) — fall through to the connect form.
+  }
+  box.innerHTML = `
+    <input type="password" class="settings-text" id="gh-token-input" placeholder="ghp_…" autocomplete="off" spellcheck="false" />
+    <button class="tbtn primary" id="gh-connect-btn">Connect</button>
+    <div id="gh-token-error" class="hidden"></div>
+  `;
+  const errBox = document.getElementById('gh-token-error');
+  const connectBtn = document.getElementById('gh-connect-btn');
+  const doConnect = async () => {
+    const input = document.getElementById('gh-token-input');
+    const token = input.value.trim();
+    if (!token) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'Connecting…';
+    errBox.classList.add('hidden');
+    const res = await window.nexo.setGithubToken(token);
+    connectBtn.disabled = false;
+    connectBtn.textContent = 'Connect';
+    if (!res.ok) {
+      errBox.textContent = res.error;
+      errBox.classList.remove('hidden');
+      return;
+    }
+    renderGithubSettingsControl();
+  };
+  connectBtn.addEventListener('click', doConnect);
+  document.getElementById('gh-token-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doConnect(); }
+  });
+}
+
+// ---------------- Snippets ----------------
+let snippetEditingId = null;
+
+function renderSnippetsList() {
+  const box = document.getElementById('snippets-list');
+  if (!box) return;
+  const snippets = uiState.snippets || [];
+  if (!snippets.length) {
+    box.innerHTML = '<div class="settings-row-desc" style="margin-bottom:10px;">No snippets yet.</div>';
+    return;
+  }
+  box.innerHTML = snippets.map((s) => `
+    <div class="snippet-row" data-id="${escapeHtml(s.id)}">
+      <div class="snippet-row-main">
+        <span class="snippet-prefix">${escapeHtml(s.prefix)}</span>
+        <span class="snippet-lang">${escapeHtml(s.language === 'all' ? 'all languages' : s.language)}</span>
+        ${s.description ? `<span class="snippet-desc">${escapeHtml(s.description)}</span>` : ''}
+      </div>
+      <div class="snippet-row-actions">
+        <button class="icon-btn snippet-edit-btn" title="Edit">✎</button>
+        <button class="icon-btn snippet-delete-btn" title="Delete">🗑</button>
+      </div>
+    </div>`).join('');
+  box.querySelectorAll('.snippet-edit-btn').forEach((btn) => {
+    btn.addEventListener('click', () => openSnippetForm(btn.closest('.snippet-row').dataset.id));
+  });
+  box.querySelectorAll('.snippet-delete-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.closest('.snippet-row').dataset.id;
+      const s = (uiState.snippets || []).find((x) => x.id === id);
+      if (s && !confirm(`Delete the "${s.prefix}" snippet?`)) return;
+      uiState.snippets = (uiState.snippets || []).filter((x) => x.id !== id);
+      await window.nexo.setPrefs({ snippets: uiState.snippets });
+      renderSnippetsList();
+    });
+  });
+}
+
+function openSnippetForm(id) {
+  const form = document.getElementById('snippet-form');
+  form.classList.remove('hidden');
+  if (id) {
+    const s = (uiState.snippets || []).find((x) => x.id === id);
+    if (!s) return;
+    snippetEditingId = id;
+    document.getElementById('snippet-prefix').value = s.prefix;
+    document.getElementById('snippet-language').value = s.language;
+    document.getElementById('snippet-description').value = s.description || '';
+    document.getElementById('snippet-body').value = s.body;
+    document.getElementById('snippet-save-btn').textContent = 'Update Snippet';
+  } else {
+    snippetEditingId = null;
+    document.getElementById('snippet-prefix').value = '';
+    document.getElementById('snippet-language').value = 'all';
+    document.getElementById('snippet-description').value = '';
+    document.getElementById('snippet-body').value = '';
+    document.getElementById('snippet-save-btn').textContent = 'Save Snippet';
+  }
+  document.getElementById('snippet-prefix').focus();
+}
+
+function closeSnippetForm() {
+  document.getElementById('snippet-form').classList.add('hidden');
+  snippetEditingId = null;
+}
+
+function wireSnippetForm() {
+  document.getElementById('snippets-add-btn').addEventListener('click', () => openSnippetForm(null));
+  document.getElementById('snippet-cancel-btn').addEventListener('click', closeSnippetForm);
+  document.getElementById('snippet-save-btn').addEventListener('click', async () => {
+    const prefix = document.getElementById('snippet-prefix').value.trim();
+    const language = document.getElementById('snippet-language').value;
+    const description = document.getElementById('snippet-description').value.trim();
+    const body = document.getElementById('snippet-body').value;
+    if (!prefix) { document.getElementById('snippet-prefix').focus(); return; }
+    if (!body.trim()) { document.getElementById('snippet-body').focus(); return; }
+    const list = [...(uiState.snippets || [])];
+    if (snippetEditingId) {
+      const idx = list.findIndex((s) => s.id === snippetEditingId);
+      if (idx !== -1) list[idx] = { ...list[idx], prefix, language, description, body };
+    } else {
+      list.push({ id: `snip_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, prefix, language, description, body });
+    }
+    uiState.snippets = list;
+    await window.nexo.setPrefs({ snippets: list });
+    closeSnippetForm();
+    renderSnippetsList();
   });
 }
 
@@ -2794,6 +3560,468 @@ document.addEventListener('click', (e) => {
   if (!dropdown.classList.contains('hidden') && !dropdown.contains(e.target) && e.target.id !== 'btn-theme-toggle') {
     dropdown.classList.add('hidden');
   }
+});
+
+// ---------------- Outline (symbols) ----------------
+// Lightweight regex-based symbol extraction — good enough for jumping around
+// a file without pulling in a full language server per language.
+function extractSymbols(model, lang) {
+  const lines = model.getValue().split('\n');
+  const out = [];
+  const push = (line, name, kind) => { if (name) out.push({ line, name: name.trim(), kind }); };
+
+  if (lang === 'markdown') {
+    lines.forEach((l, i) => {
+      const m = l.match(/^(#{1,6})\s+(.+)/);
+      if (m) push(i + 1, m[2], `H${m[1].length}`);
+    });
+    return out;
+  }
+  if (lang === 'css' || lang === 'scss' || lang === 'less') {
+    lines.forEach((l, i) => {
+      const m = l.match(/^\s*([.#][A-Za-z0-9_][A-Za-z0-9_.:#\- >]*)\s*\{/);
+      if (m) push(i + 1, m[1], 'S');
+    });
+    return out;
+  }
+  if (lang === 'python') {
+    lines.forEach((l, i) => {
+      let m = l.match(/^\s*class\s+([A-Za-z0-9_]+)/);
+      if (m) { push(i + 1, m[1], 'C'); return; }
+      m = l.match(/^\s*(?:async\s+)?def\s+([A-Za-z0-9_]+)/);
+      if (m) push(i + 1, m[1], 'F');
+    });
+    return out;
+  }
+  // Default: JS/TS/JSX/TSX-ish
+  const patterns = [
+    [/^\s*(?:export\s+)?(?:default\s+)?class\s+([A-Za-z0-9_$]+)/, 'C'],
+    [/^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z0-9_$]+)/, 'F'],
+    [/^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/, 'F'],
+    [/^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?[A-Za-z0-9_$]*\s*=>/, 'F'],
+    [/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/, 'V'],
+  ];
+  lines.forEach((l, i) => {
+    for (const [re, kind] of patterns) {
+      const m = l.match(re);
+      if (m) { push(i + 1, m[1], kind); break; }
+    }
+  });
+  return out;
+}
+
+function renderOutlinePanel() {
+  const box = document.getElementById('outline-list');
+  if (!box) return;
+  const tab = state.openTabs.find((t) => t.path === state.activeTab);
+  if (!tab) { box.innerHTML = '<div id="outline-empty">Open a file to see its outline.</div>'; return; }
+  const lang = tab.model.getLanguageId ? tab.model.getLanguageId() : '';
+  const symbols = extractSymbols(tab.model, lang);
+  if (!symbols.length) { box.innerHTML = '<div id="outline-empty">No symbols found in this file.</div>'; return; }
+  box.innerHTML = symbols.map((s) =>
+    `<div class="outline-row" data-line="${s.line}"><span class="outline-kind">${escapeHtml(s.kind)}</span><span>${escapeHtml(s.name)}</span></div>`
+  ).join('');
+  box.querySelectorAll('.outline-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      const line = parseInt(row.dataset.line, 10);
+      if (state.activeTab !== tab.path) activateTab(tab.path);
+      if (editor) {
+        editor.revealLineInCenter(line);
+        editor.setPosition({ lineNumber: line, column: 1 });
+        editor.focus();
+      }
+    });
+  });
+}
+
+function refreshOutlineIfVisible() {
+  const panel = document.getElementById('panel-outline');
+  if (panel && panel.classList.contains('active')) renderOutlinePanel();
+}
+
+let outlineRefreshTimer = null;
+function scheduleOutlineRefresh() {
+  clearTimeout(outlineRefreshTimer);
+  outlineRefreshTimer = setTimeout(refreshOutlineIfVisible, 400);
+}
+
+// ---------------- ESLint gutter markers ----------------
+// Uses the project's own local eslint install (node_modules/.bin/eslint) —
+// never bundled, never auto-installed. Projects without it just get no
+// markers, silently, rather than an error toast on every file.
+const ESLINT_LANGUAGES = new Set(['javascript', 'typescript']);
+const noEslintProjects = new Set();
+let eslintLintTimer = null;
+
+function scheduleLint(filePath) {
+  clearTimeout(eslintLintTimer);
+  eslintLintTimer = setTimeout(() => lintFile(filePath), 700);
+}
+
+async function refreshBlameForTab(filePath) {
+  if (!state.projectRoot) return;
+  const res = await window.nexo.gitBlame(state.projectRoot, filePath);
+  const tab = state.openTabs.find((t) => t.path === filePath);
+  if (!tab) return; // closed while the request was in flight
+  tab.blameLines = res.ok ? res.lines : null; // untracked/new files, or no repo — hover just shows nothing
+}
+
+async function lintFile(filePath) {
+  if (!state.projectRoot || noEslintProjects.has(state.projectRoot) || !monacoLoaded) return;
+  const tab = state.openTabs.find((t) => t.path === filePath);
+  if (!tab) return;
+  const lang = tab.model.getLanguageId ? tab.model.getLanguageId() : '';
+  if (!ESLINT_LANGUAGES.has(lang)) { monaco.editor.setModelMarkers(tab.model, 'eslint', []); return; }
+  const res = await window.nexo.lintFile(state.projectRoot, filePath, tab.model.getValue());
+  const stillOpen = state.openTabs.find((t) => t.path === filePath);
+  if (!stillOpen) return; // tab closed while the lint request was in flight
+  if (!res.ok) {
+    if (res.reason === 'not-found') noEslintProjects.add(state.projectRoot);
+    return;
+  }
+  const markers = res.messages.map((m) => ({
+    startLineNumber: m.line, startColumn: m.column, endLineNumber: m.endLine, endColumn: m.endColumn,
+    message: m.ruleId ? `${m.message} (${m.ruleId})` : m.message,
+    severity: m.severity === 2 ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+    source: 'eslint',
+  }));
+  monaco.editor.setModelMarkers(stillOpen.model, 'eslint', markers);
+}
+
+// ---------------- npm Scripts panel ----------------
+let scriptsState = { scripts: null, error: null };
+
+async function loadScripts() {
+  if (!state.projectRoot) { scriptsState = { scripts: null, error: 'Open a folder first.' }; renderScriptsPanel(); return; }
+  const sep = state.projectRoot.includes('\\') ? '\\' : '/';
+  const pkgPath = state.projectRoot + sep + 'package.json';
+  const res = await window.nexo.readFile(pkgPath);
+  if (!res.ok) { scriptsState = { scripts: null, error: 'No package.json found in this project.' }; renderScriptsPanel(); return; }
+  try {
+    const pkg = JSON.parse(res.content);
+    scriptsState = { scripts: pkg.scripts || {}, error: null };
+  } catch {
+    scriptsState = { scripts: null, error: 'Could not parse package.json.' };
+  }
+  renderScriptsPanel();
+}
+
+function orderedScriptNames() {
+  const names = Object.keys(scriptsState.scripts || {});
+  const order = (uiState.scriptsOrder || []).filter((n) => names.includes(n));
+  const rest = names.filter((n) => !order.includes(n));
+  return [...order, ...rest];
+}
+
+let draggedScriptName = null;
+
+function renderScriptsPanel() {
+  const box = document.getElementById('scripts-list');
+  if (!box) return;
+  if (!scriptsState.scripts) {
+    box.innerHTML = `<div id="scripts-empty">${escapeHtml(scriptsState.error || 'Loading…')}</div>`;
+    return;
+  }
+  const names = orderedScriptNames();
+  if (!names.length) { box.innerHTML = '<div id="scripts-empty">No scripts defined in package.json.</div>'; return; }
+  box.innerHTML = names.map((name) => {
+    const running = terminals.some((t) => t.runningScript === name);
+    return `
+      <div class="script-row" draggable="true" data-script="${escapeHtml(name)}">
+        <div class="script-row-main">
+          <div class="script-row-name">${escapeHtml(name)}</div>
+          <div class="script-row-cmd">${escapeHtml(scriptsState.scripts[name])}</div>
+        </div>
+        <button class="script-run-btn ${running ? 'running' : ''}" data-script="${escapeHtml(name)}">${running ? '■ Stop' : '▶ Run'}</button>
+      </div>`;
+  }).join('');
+  box.querySelectorAll('.script-run-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const name = btn.dataset.script;
+      const runningTerm = terminals.find((t) => t.runningScript === name);
+      if (runningTerm) { switchTerminalTab(runningTerm.id); stopTerminalCommand(); }
+      else runScript(name);
+    });
+  });
+  box.querySelectorAll('.script-row').forEach((row) => {
+    row.addEventListener('dragstart', () => { draggedScriptName = row.dataset.script; });
+    row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('script-drag-over'); });
+    row.addEventListener('dragleave', () => row.classList.remove('script-drag-over'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      row.classList.remove('script-drag-over');
+      const targetName = row.dataset.script;
+      if (!draggedScriptName || draggedScriptName === targetName) return;
+      const order = orderedScriptNames();
+      const fromIdx = order.indexOf(draggedScriptName);
+      const toIdx = order.indexOf(targetName);
+      if (fromIdx === -1 || toIdx === -1) return;
+      order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, draggedScriptName);
+      uiState.scriptsOrder = order;
+      window.nexo.setPrefs({ scriptsOrder: order });
+      draggedScriptName = null;
+      renderScriptsPanel();
+    });
+    row.addEventListener('dragend', () => {
+      draggedScriptName = null;
+      box.querySelectorAll('.script-drag-over').forEach((r) => r.classList.remove('script-drag-over'));
+    });
+  });
+}
+
+async function runScript(name) {
+  if (!state.projectRoot || !scriptsState.scripts || !(name in scriptsState.scripts)) return;
+  toggleTerminal(true);
+  let t = getActiveTerminal();
+  if (t && t.activeRunId) { t = createTerminalSession(); switchTerminalTab(t.id); } // busy tab — run in a fresh one instead of blocking
+  if (!t) return;
+  resetAnsiState(t);
+  const cmd = `npm run ${name}`;
+  termAppend(t, `\n$ ${cmd}\n`, 'term-cmd');
+  t.history.push(cmd);
+  t.historyIdx = t.history.length;
+  const res = await window.nexo.runCommand(state.projectRoot, cmd);
+  if (!res.id) { termAppend(t, `[error] ${res.error || 'Could not start command.'}\n`, 'term-err'); return; }
+  t.activeRunId = res.id;
+  t.runningScript = name;
+  if (t.id === activeTerminalId) document.getElementById('term-run-btn').textContent = 'Stop';
+  renderTerminalTabs();
+  renderScriptsPanel();
+}
+
+document.getElementById('btn-scripts-refresh').addEventListener('click', loadScripts);
+
+// ---------------- GitHub PRs / Issues panel ----------------
+let githubPanelState = { subtab: 'pulls', pulls: null, issues: null, pullsError: null, issuesError: null, error: null, loading: false };
+
+async function loadGithubPanel() {
+  const status = await window.nexo.hasGithubToken();
+  if (!status.hasToken) {
+    githubPanelState = { ...githubPanelState, pulls: null, issues: null, error: 'not-connected', loading: false };
+    renderGithubPanel();
+    return;
+  }
+  if (!state.projectRoot) {
+    githubPanelState = { ...githubPanelState, pulls: null, issues: null, error: 'no-project', loading: false };
+    renderGithubPanel();
+    return;
+  }
+  githubPanelState.loading = true;
+  githubPanelState.error = null;
+  renderGithubPanel();
+  const [pullsRes, issuesRes] = await Promise.all([
+    window.nexo.listGithubPulls(state.projectRoot),
+    window.nexo.listGithubIssues(state.projectRoot),
+  ]);
+  githubPanelState.loading = false;
+  if (!pullsRes.ok && !issuesRes.ok) {
+    githubPanelState.error = pullsRes.error || issuesRes.error;
+  } else {
+    githubPanelState.pulls = pullsRes.ok ? pullsRes.pulls : [];
+    githubPanelState.issues = issuesRes.ok ? issuesRes.issues : [];
+    githubPanelState.pullsError = pullsRes.ok ? null : pullsRes.error;
+    githubPanelState.issuesError = issuesRes.ok ? null : issuesRes.error;
+  }
+  renderGithubPanel();
+}
+
+function renderGithubPanel() {
+  document.getElementById('github-tab-pulls').classList.toggle('active', githubPanelState.subtab === 'pulls');
+  document.getElementById('github-tab-issues').classList.toggle('active', githubPanelState.subtab === 'issues');
+  const body = document.getElementById('github-body');
+
+  if (githubPanelState.error === 'not-connected') {
+    body.innerHTML = '<div class="git-empty">Connect a GitHub token in Settings to see PRs &amp; issues.</div>';
+    return;
+  }
+  if (githubPanelState.error === 'no-project') {
+    body.innerHTML = '<div class="git-empty">Open a project first.</div>';
+    return;
+  }
+  if (githubPanelState.loading) {
+    body.innerHTML = '<div class="git-empty">Loading…</div>';
+    return;
+  }
+  if (githubPanelState.error) {
+    body.innerHTML = `<div class="git-empty">${escapeHtml(githubPanelState.error)}</div>`;
+    return;
+  }
+
+  const items = githubPanelState.subtab === 'pulls' ? githubPanelState.pulls : githubPanelState.issues;
+  const itemsError = githubPanelState.subtab === 'pulls' ? githubPanelState.pullsError : githubPanelState.issuesError;
+  if (itemsError) { body.innerHTML = `<div class="git-empty">${escapeHtml(itemsError)}</div>`; return; }
+  if (!items || !items.length) {
+    body.innerHTML = `<div class="git-empty">No open ${githubPanelState.subtab === 'pulls' ? 'pull requests' : 'issues'}.</div>`;
+    return;
+  }
+  body.innerHTML = items.map((it) => `
+    <div class="gh-item-row" data-url="${escapeHtml(it.url)}">
+      <div class="gh-item-title">${it.draft ? '<span class="gh-draft-badge">Draft</span>' : ''}${escapeHtml(it.title)}</div>
+      <div class="gh-item-meta">#${it.number} · ${escapeHtml(it.author)}${githubPanelState.subtab === 'pulls' ? ` · ${escapeHtml(it.branch)}` : ''}</div>
+      ${it.labels && it.labels.length ? `<div class="gh-item-labels">${it.labels.map((l) => `<span class="gh-label">${escapeHtml(l)}</span>`).join('')}</div>` : ''}
+    </div>
+  `).join('');
+  body.querySelectorAll('.gh-item-row').forEach((row) => {
+    row.addEventListener('click', () => window.nexo.openExternal(row.dataset.url));
+  });
+}
+
+document.getElementById('github-tab-pulls').addEventListener('click', () => { githubPanelState.subtab = 'pulls'; renderGithubPanel(); });
+document.getElementById('github-tab-issues').addEventListener('click', () => { githubPanelState.subtab = 'issues'; renderGithubPanel(); });
+document.getElementById('btn-github-refresh').addEventListener('click', loadGithubPanel);
+
+// ---------------- Command Palette / Quick Open ----------------
+const paletteState = { mode: 'files', items: [], active: 0, filesCache: null };
+
+const PALETTE_COMMANDS = [
+  { label: 'Open Folder…', run: handleOpenFolder },
+  { label: 'New File', run: handleNewFile },
+  { label: 'Save', run: saveActiveTab },
+  { label: 'Save As…', run: saveActiveTabAs },
+  { label: 'Find in Files', run: () => switchRailView('search') },
+  { label: 'Source Control', run: () => switchRailView('git') },
+  { label: 'npm Scripts', run: () => switchRailView('scripts') },
+  { label: 'Outline', run: () => switchRailView('outline') },
+  { label: 'Sites Monitor', run: () => switchRailView('sites') },
+  { label: 'Settings', run: () => switchRailView('settings') },
+  { label: 'GitHub', run: () => switchRailView('github') },
+  { label: 'Browse GitHub Repos…', run: openGithubRepoPicker },
+  { label: 'Create GitHub Repo…', run: handleCreateGithubRepo },
+  { label: 'Toggle Terminal', run: () => toggleTerminal() },
+  { label: 'Toggle Split Editor', run: () => toggleSplit() },
+  { label: 'Toggle Zen Mode', run: () => toggleZenMode() },
+  { label: 'Toggle Sidebar', run: () => { const sb = document.getElementById('sidebar'); sb.style.display = sb.style.display === 'none' ? 'flex' : 'none'; } },
+  { label: 'Check for Updates…', run: () => window.nexo.checkForUpdates(true) },
+];
+
+async function openPalette(mode) {
+  const overlay = document.getElementById('palette-overlay');
+  const input = document.getElementById('palette-input');
+  paletteState.mode = mode;
+  overlay.classList.remove('hidden');
+  input.value = mode === 'commands' ? '>' : '';
+  input.placeholder = mode === 'github-repos' ? 'Search your GitHub repos…' : 'Search files… (type > for commands)';
+  if (mode === 'files' && state.projectRoot) {
+    if (!paletteState.filesCache) {
+      const res = await window.nexo.listFiles(state.projectRoot);
+      paletteState.filesCache = res.files || [];
+    }
+  }
+  if (mode === 'github-repos') {
+    const status = await window.nexo.hasGithubToken();
+    if (!status.hasToken) {
+      closePalette();
+      alert('Connect a GitHub token in Settings first.');
+      return;
+    }
+    document.getElementById('palette-empty').textContent = 'Loading your repos…';
+    document.getElementById('palette-empty').classList.remove('hidden');
+    document.getElementById('palette-list').innerHTML = '';
+    const res = await window.nexo.listGithubRepos();
+    if (!res.ok) {
+      closePalette();
+      alert(`Could not load GitHub repos:\n${res.error}`);
+      return;
+    }
+    paletteState.githubRepos = res.repos;
+  }
+  renderPaletteResults();
+  input.focus();
+  input.select();
+}
+
+function closePalette() {
+  document.getElementById('palette-overlay').classList.add('hidden');
+}
+
+function paletteFuzzyMatch(query, text) {
+  if (!query) return true;
+  let qi = 0;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) qi++;
+  }
+  return qi === q.length;
+}
+
+function renderPaletteResults() {
+  const raw = document.getElementById('palette-input').value;
+  const isCommand = raw.startsWith('>');
+  const query = isCommand ? raw.slice(1).trim() : raw.trim();
+
+  let items = [];
+  if (paletteState.mode === 'github-repos') {
+    const repos = paletteState.githubRepos || [];
+    items = repos
+      .filter((r) => paletteFuzzyMatch(raw.trim(), r.fullName))
+      .slice(0, 200)
+      .map((r) => ({
+        label: r.fullName,
+        meta: r.private ? 'private' : 'public',
+        icon: '📦',
+        run: () => continueCloneFlow(r.cloneUrl),
+      }));
+  } else if (isCommand) {
+    items = PALETTE_COMMANDS
+      .filter((c) => paletteFuzzyMatch(query, c.label))
+      .map((c) => ({ label: c.label, icon: '⚡', run: c.run }));
+  } else if (state.projectRoot) {
+    const files = paletteState.filesCache || [];
+    items = files
+      .filter((f) => paletteFuzzyMatch(query, f))
+      .slice(0, 200)
+      .map((f) => ({ label: f.split(/[\\/]/).pop(), meta: f, icon: fileIcon(f, false), run: () => openFile(f) }));
+  }
+
+  paletteState.items = items;
+  paletteState.active = 0;
+  const list = document.getElementById('palette-list');
+  const empty = document.getElementById('palette-empty');
+  if (!items.length) {
+    list.innerHTML = '';
+    empty.classList.remove('hidden');
+    empty.textContent = state.projectRoot || isCommand ? 'No matches.' : 'Open a folder to search its files.';
+    return;
+  }
+  empty.classList.add('hidden');
+  list.innerHTML = items.map((it, i) => `
+    <div class="palette-item ${i === 0 ? 'active' : ''}" data-idx="${i}">
+      <span class="palette-icon">${it.icon || ''}</span>
+      <span class="palette-label">${escapeHtml(it.label)}</span>
+      ${it.meta ? `<span class="palette-meta">${escapeHtml(it.meta)}</span>` : ''}
+    </div>`).join('');
+  list.querySelectorAll('.palette-item').forEach((el) => {
+    el.addEventListener('click', () => runPaletteItem(parseInt(el.dataset.idx, 10)));
+  });
+}
+
+function runPaletteItem(idx) {
+  const item = paletteState.items[idx];
+  if (!item) return;
+  closePalette();
+  item.run();
+}
+
+function setPaletteActive(idx) {
+  const list = document.getElementById('palette-list');
+  const rows = list.querySelectorAll('.palette-item');
+  if (!rows.length) return;
+  paletteState.active = Math.max(0, Math.min(idx, rows.length - 1));
+  rows.forEach((r, i) => r.classList.toggle('active', i === paletteState.active));
+  rows[paletteState.active].scrollIntoView({ block: 'nearest' });
+}
+
+document.getElementById('palette-input').addEventListener('input', renderPaletteResults);
+document.getElementById('palette-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteActive(paletteState.active + 1); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteActive(paletteState.active - 1); return; }
+  if (e.key === 'Enter') { e.preventDefault(); runPaletteItem(paletteState.active); }
+});
+document.getElementById('palette-overlay').addEventListener('mousedown', (e) => {
+  if (e.target.id === 'palette-overlay') closePalette();
 });
 
 // ---------------- Boot ----------------

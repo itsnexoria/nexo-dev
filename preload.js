@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('nexo', {
   // dialogs
   openFolder: () => ipcRenderer.invoke('dialog:open-folder'),
   newProject: () => ipcRenderer.invoke('dialog:new-project'),
+  pickFolder: (title) => ipcRenderer.invoke('dialog:pick-folder', title),
+  cloneRepo: (url, destParentDir) => ipcRenderer.invoke('git:clone', url, destParentDir),
   saveAsDialog: (defaultName) => ipcRenderer.invoke('dialog:save-as', defaultName),
   revealInFolder: (targetPath) => ipcRenderer.invoke('shell:reveal', targetPath),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
@@ -20,6 +22,8 @@ contextBridge.exposeInMainWorld('nexo', {
 
   // global search
   searchText: (rootPath, query, opts) => ipcRenderer.invoke('search:text', rootPath, query, opts),
+  replaceAll: (rootPath, query, replacement, opts) => ipcRenderer.invoke('search:replace-all', rootPath, query, replacement, opts),
+  listFiles: (rootPath) => ipcRenderer.invoke('fs:list-files', rootPath),
 
   // git
   gitStatus: (projectRoot) => ipcRenderer.invoke('git:status', projectRoot),
@@ -33,6 +37,18 @@ contextBridge.exposeInMainWorld('nexo', {
   gitCreateBranch: (projectRoot, branchName) => ipcRenderer.invoke('git:create-branch', projectRoot, branchName),
   gitLog: (projectRoot, limit) => ipcRenderer.invoke('git:log', projectRoot, limit),
   gitIgnoredPaths: (projectRoot) => ipcRenderer.invoke('git:ignored-paths', projectRoot),
+  gitBlame: (projectRoot, filePath) => ipcRenderer.invoke('git:blame', projectRoot, filePath),
+
+  // GitHub API
+  setGithubToken: (token) => ipcRenderer.invoke('github:set-token', token),
+  getGithubUser: () => ipcRenderer.invoke('github:get-user'),
+  clearGithubToken: () => ipcRenderer.invoke('github:clear-token'),
+  hasGithubToken: () => ipcRenderer.invoke('github:has-token'),
+  listGithubRepos: () => ipcRenderer.invoke('github:list-repos'),
+  createGithubRepo: (opts) => ipcRenderer.invoke('github:create-repo', opts),
+  listGithubPulls: (projectRoot) => ipcRenderer.invoke('github:list-pulls', projectRoot),
+  listGithubIssues: (projectRoot) => ipcRenderer.invoke('github:list-issues', projectRoot),
+  lintFile: (projectRoot, filePath, content) => ipcRenderer.invoke('eslint:lint', projectRoot, filePath, content),
 
   // external file-change watching
   watchFile: (filePath) => ipcRenderer.invoke('watch:start', filePath),
@@ -48,6 +64,8 @@ contextBridge.exposeInMainWorld('nexo', {
 
   // preferences
   getPrefs: () => ipcRenderer.invoke('prefs:get'),
+  saveSession: (projectRoot, data) => ipcRenderer.invoke('session:save', projectRoot, data),
+  loadSession: (projectRoot) => ipcRenderer.invoke('session:load', projectRoot),
   setPrefs: (partial) => ipcRenderer.invoke('prefs:set', partial),
 
   // command runner (safe alternative to a full terminal)
