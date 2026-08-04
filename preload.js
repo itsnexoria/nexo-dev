@@ -11,15 +11,6 @@ contextBridge.exposeInMainWorld('nexo', {
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   notifyReady: () => ipcRenderer.send('app:ready'),
 
-  // site monitoring + SEO audits
-  getSites: () => ipcRenderer.invoke('sites:get'),
-  addSite: (url, name) => ipcRenderer.invoke('sites:add', url, name),
-  removeSite: (id) => ipcRenderer.invoke('sites:remove', id),
-  checkSite: (id) => ipcRenderer.invoke('sites:check', id),
-  auditSite: (id) => ipcRenderer.invoke('sites:audit', id),
-  setSiteInterval: (id, minutes) => ipcRenderer.invoke('sites:set-interval', id, minutes),
-  onSitesUpdated: (callback) => ipcRenderer.on('sites:updated', (evt, list) => callback(list)),
-
   // global search
   searchText: (rootPath, query, opts) => ipcRenderer.invoke('search:text', rootPath, query, opts),
   replaceAll: (rootPath, query, replacement, opts) => ipcRenderer.invoke('search:replace-all', rootPath, query, replacement, opts),
@@ -29,7 +20,9 @@ contextBridge.exposeInMainWorld('nexo', {
   gitStatus: (projectRoot) => ipcRenderer.invoke('git:status', projectRoot),
   gitDiff: (projectRoot, relPath, staged) => ipcRenderer.invoke('git:diff', projectRoot, relPath, staged),
   gitStage: (projectRoot, relPath) => ipcRenderer.invoke('git:stage', projectRoot, relPath),
+  gitStageAll: (projectRoot) => ipcRenderer.invoke('git:stage-all', projectRoot),
   gitUnstage: (projectRoot, relPath) => ipcRenderer.invoke('git:unstage', projectRoot, relPath),
+  gitUnstageAll: (projectRoot) => ipcRenderer.invoke('git:unstage-all', projectRoot),
   gitDiscard: (projectRoot, relPath) => ipcRenderer.invoke('git:discard', projectRoot, relPath),
   gitCommit: (projectRoot, message) => ipcRenderer.invoke('git:commit', projectRoot, message),
   gitBranches: (projectRoot) => ipcRenderer.invoke('git:branches', projectRoot),
@@ -48,6 +41,8 @@ contextBridge.exposeInMainWorld('nexo', {
   createGithubRepo: (opts) => ipcRenderer.invoke('github:create-repo', opts),
   listGithubPulls: (projectRoot) => ipcRenderer.invoke('github:list-pulls', projectRoot),
   listGithubIssues: (projectRoot) => ipcRenderer.invoke('github:list-issues', projectRoot),
+  listGithubReleases: (projectRoot) => ipcRenderer.invoke('github:list-releases', projectRoot),
+  createGithubRelease: (projectRoot, opts) => ipcRenderer.invoke('github:create-release', projectRoot, opts),
   lintFile: (projectRoot, filePath, content) => ipcRenderer.invoke('eslint:lint', projectRoot, filePath, content),
 
   // external file-change watching

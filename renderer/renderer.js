@@ -21,7 +21,6 @@ const uiState = {
   snippets: [],
   autoSave: false,
   autoSaveDelayMs: 1000,
-  defaultSiteInterval: 10,
   customShell: '',
   customTheme: { bg: '#0c0c10', text: '#ececf0', accent: '#ff3b30' },
   customThemes: [],
@@ -1851,6 +1850,7 @@ document.getElementById('welcome-open').addEventListener('click', handleOpenFold
 document.getElementById('welcome-new').addEventListener('click', handleNewProject);
 document.getElementById('welcome-clone').addEventListener('click', handleCloneRepo);
 document.getElementById('welcome-github-repos').addEventListener('click', openGithubRepoPicker);
+document.getElementById('welcome-github-create').addEventListener('click', handleCreateGithubRepo);
 
 function openGithubRepoPicker() {
   paletteState.githubRepos = null; // force a fresh fetch each time
@@ -1936,14 +1936,6 @@ if (window.nexo.onMenu) {
   window.nexo.onMenu('menu:toggle-sidebar', () => {
     const sb = document.getElementById('sidebar');
     sb.style.display = sb.style.display === 'none' ? 'flex' : 'none';
-  });
-}
-
-if (window.nexo.onSitesUpdated) {
-  window.nexo.onSitesUpdated((list) => {
-    sitesState.sites = list;
-    renderSitesList();
-    if (sitesState.selectedId) renderSiteDetail();
   });
 }
 
@@ -2036,236 +2028,6 @@ window.addEventListener('beforeunload', (e) => {
     e.returnValue = '';
   }
 });
-
-// ==================================================================
-// Sites workspace — uptime monitoring + SEO audits
-// ==================================================================
-const sitesState = {
-  sites: [],
-  selectedId: null,
-  checking: new Set(), // ids currently being checked/audited (for spinner state)
-};
-
-function timeAgo(ts) {
-  if (!ts) return 'never';
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-async function loadSites() {
-  sitesState.sites = await window.nexo.getSites();
-  renderSitesList();
-  if (sitesState.selectedId) renderSiteDetail();
-}
-
-function renderSitesList() {
-  const box = document.getElementById('sites-list');
-  const empty = document.getElementById('sites-list-empty');
-  box.innerHTML = '';
-  empty.style.display = sitesState.sites.length ? 'none' : 'block';
-
-  for (const site of sitesState.sites) {
-    const row = document.createElement('div');
-    row.className = 'site-row' + (site.id === sitesState.selectedId ? ' active' : '');
-    let dotClass = 'gray';
-    if (site.lastCheck) dotClass = site.lastCheck.ok ? 'green' : 'red';
-    if (sitesState.checking.has(site.id)) dotClass = 'pulsing';
-    row.innerHTML = `
-      <span class="site-dot ${dotClass}"></span>
-      <span class="site-row-text">
-        <span class="site-row-name">${escapeHtml(site.name)}</span>
-        <span class="site-row-url">${escapeHtml(site.url.replace(/^https?:\/\//, ''))}</span>
-      </span>
-    `;
-    row.addEventListener('click', () => selectSite(site.id));
-    box.appendChild(row);
-  }
-}
-
-function selectSite(id) {
-  sitesState.selectedId = id;
-  document.getElementById('sites-welcome').style.display = 'none';
-  document.getElementById('site-detail').style.display = 'block';
-  renderSitesList();
-  renderSiteDetail();
-}
-
-function scoreColor(score) {
-  if (score >= 80) return 'var(--ok)';
-  if (score >= 50) return '#e6b83c';
-  return 'var(--danger)';
-}
-
-function buildSparkline(history) {
-  if (!history || !history.length) return '<span class="trend-empty">No check history yet.</span>';
-  const recent = history.slice(-30);
-  const upCount = recent.filter((h) => h.ok).length;
-  const pct = Math.round((upCount / recent.length) * 100);
-  const maxMs = Math.max(...recent.map((h) => h.ms || 0), 1);
-  const bars = recent.map((h) => {
-    const heightPct = h.ok ? Math.max(15, Math.round(((h.ms || 0) / maxMs) * 100)) : 100;
-    const cls = h.ok ? 'up' : 'down';
-    const title = h.ok ? `${h.ms}ms — ${new Date(h.ts).toLocaleString()}` : `Down — ${new Date(h.ts).toLocaleString()}`;
-    return `<div class="spark-bar ${cls}" style="height:${heightPct}%" title="${escapeHtml(title)}"></div>`;
-  }).join('');
-  return `<div class="sparkline-wrap">${bars}</div><span class="uptime-pct"><b>${pct}%</b> up over last ${recent.length} check${recent.length === 1 ? '' : 's'}</span>`;
-}
-
-function buildAuditTrend(auditHistory) {
-  if (!auditHistory || auditHistory.length < 2) return '';
-  const recent = auditHistory.slice(-20);
-  const bars = recent.map((a) => {
-    const h = Math.max(6, a.score);
-    const color = a.score >= 80 ? 'var(--ok)' : a.score >= 50 ? '#e6b83c' : 'var(--danger)';
-    return `<div class="trend-bar" style="height:${h}%;background:${color}" title="${a.score}/100 — ${new Date(a.ts).toLocaleString()}"></div>`;
-  }).join('');
-  return `<h3 class="section-title">Score History</h3><div class="trend-row">${bars}</div>`;
-}
-
-function renderSiteDetail() {
-  const site = sitesState.sites.find((s) => s.id === sitesState.selectedId);
-  const box = document.getElementById('site-detail');
-  if (!site) { box.style.display = 'none'; document.getElementById('sites-welcome').style.display = 'flex'; return; }
-
-  const checking = sitesState.checking.has(site.id);
-  const check = site.lastCheck;
-  const statusHtml = !check
-    ? `<span class="badge gray">Not checked yet</span>`
-    : check.ok
-      ? `<span class="badge green">Up</span> <span class="detail-muted">${check.status} · ${check.ms}ms · ${timeAgo(check.checkedAt)}</span>`
-      : `<span class="badge red">Down</span> <span class="detail-muted">${escapeHtml(check.error || `Status ${check.status}`)} · ${timeAgo(check.checkedAt)}</span>`;
-
-  let auditHtml = '';
-  const audit = site.lastAudit;
-  if (audit && audit.ok) {
-    const rows = audit.breakdown.map((b) => `
-      <div class="audit-row">
-        <span class="audit-icon ${b.pass ? 'pass' : 'fail'}">${b.pass ? '✓' : '✗'}</span>
-        <span class="audit-label">${escapeHtml(b.label)}</span>
-        <span class="audit-points">${b.points}/${b.max}</span>
-        <span class="audit-detail">${escapeHtml(b.detail)}</span>
-      </div>
-    `).join('');
-    auditHtml = `
-      <div class="audit-score-row">
-        <div class="score-circle" style="--score-color:${scoreColor(audit.score)}">
-          <span>${audit.score}</span><small>/100</small>
-        </div>
-        <div class="detail-muted">Audited ${timeAgo(audit.auditedAt)}</div>
-      </div>
-      <div class="audit-breakdown">${rows}</div>
-      ${buildAuditTrend(site.auditHistory)}
-    `;
-  } else if (audit && !audit.ok) {
-    auditHtml = `<p class="detail-muted">Audit failed: ${escapeHtml(audit.error || 'unknown error')}</p>`;
-  } else {
-    auditHtml = `<p class="detail-muted">No SEO audit run yet.</p>`;
-  }
-
-  const intervalOptions = [5, 10, 15, 30, 60, 120].map((m) =>
-    `<option value="${m}" ${site.intervalMinutes === m ? 'selected' : ''}>${m < 60 ? `${m}m` : `${m / 60}h`}</option>`
-  ).join('');
-
-  box.innerHTML = `
-    <div class="detail-header">
-      <div>
-        <h2>${escapeHtml(site.name)}</h2>
-        <a href="#" id="site-open-link" class="site-url-link">${escapeHtml(site.url)} ↗</a>
-      </div>
-      <div class="detail-header-actions">
-        <button class="tbtn" id="site-check-btn" ${checking ? 'disabled' : ''}>${checking ? 'Checking…' : 'Check Now'}</button>
-        <button class="tbtn" id="site-audit-btn" ${checking ? 'disabled' : ''}>${checking ? 'Running…' : 'Run SEO Audit'}</button>
-        <button class="tbtn danger-tbtn" id="site-remove-btn">Remove</button>
-      </div>
-    </div>
-    <div class="status-line">${statusHtml}</div>
-    <div class="uptime-row">
-      ${buildSparkline(site.history)}
-      <span class="interval-control">Auto-check every
-        <select id="site-interval">${intervalOptions}</select>
-      </span>
-    </div>
-    <h3 class="section-title">SEO Audit</h3>
-    ${auditHtml}
-  `;
-  box.style.display = 'block';
-  document.getElementById('sites-welcome').style.display = 'none';
-
-  document.getElementById('site-open-link').addEventListener('click', (e) => { e.preventDefault(); window.nexo.openExternal(site.url); });
-  document.getElementById('site-check-btn').addEventListener('click', () => checkSite(site.id));
-  document.getElementById('site-audit-btn').addEventListener('click', () => auditSite(site.id));
-  document.getElementById('site-remove-btn').addEventListener('click', () => removeSite(site.id));
-  document.getElementById('site-interval').addEventListener('change', async (e) => {
-    sitesState.sites = await window.nexo.setSiteInterval(site.id, e.target.value);
-  });
-}
-
-async function checkSite(id) {
-  sitesState.checking.add(id);
-  renderSitesList();
-  if (id === sitesState.selectedId) renderSiteDetail();
-  const updated = await window.nexo.checkSite(id);
-  sitesState.checking.delete(id);
-  if (updated) {
-    const idx = sitesState.sites.findIndex((s) => s.id === id);
-    if (idx !== -1) sitesState.sites[idx] = updated;
-  }
-  renderSitesList();
-  if (id === sitesState.selectedId) renderSiteDetail();
-}
-
-async function auditSite(id) {
-  sitesState.checking.add(id);
-  renderSitesList();
-  if (id === sitesState.selectedId) renderSiteDetail();
-  const updated = await window.nexo.auditSite(id);
-  sitesState.checking.delete(id);
-  if (updated) {
-    const idx = sitesState.sites.findIndex((s) => s.id === id);
-    if (idx !== -1) sitesState.sites[idx] = updated;
-  }
-  renderSitesList();
-  if (id === sitesState.selectedId) renderSiteDetail();
-}
-
-async function removeSite(id) {
-  const site = sitesState.sites.find((s) => s.id === id);
-  if (!site) return;
-  const ok = confirm(`Stop monitoring "${site.name}"?`);
-  if (!ok) return;
-  sitesState.sites = await window.nexo.removeSite(id);
-  if (sitesState.selectedId === id) sitesState.selectedId = null;
-  renderSitesList();
-  renderSiteDetail();
-}
-
-function addSiteFlow() {
-  showModal({
-    title: 'Add Site to Monitor',
-    confirmLabel: 'Add Site',
-    fields: [
-      { id: 'url', label: 'Website URL', placeholder: 'example.com' },
-      { id: 'name', label: 'Display name (optional)', placeholder: 'My Site', required: false },
-    ],
-    onConfirm: async ({ url, name }) => {
-      try { new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`); }
-      catch { return 'That doesn\'t look like a valid URL.'; }
-      sitesState.sites = await window.nexo.addSite(url, name);
-      renderSitesList();
-      const newest = sitesState.sites[0];
-      selectSite(newest.id);
-      checkSite(newest.id);
-      auditSite(newest.id);
-      return null;
-    },
-  });
-}
-
-document.getElementById('btn-add-site').addEventListener('click', addSiteFlow);
-document.getElementById('sites-welcome-add').addEventListener('click', addSiteFlow);
 
 // ---------------- Global search ----------------
 let searchDebounceTimer = null;
@@ -2602,14 +2364,32 @@ function renderGitPanel() {
     if (gitState.staged.length) {
       const t = document.createElement('div');
       t.className = 'git-section-title';
-      t.textContent = `STAGED CHANGES (${gitState.staged.length})`;
+      t.innerHTML = `<span>STAGED CHANGES (${gitState.staged.length})</span>`;
+      const unstageAllBtn = document.createElement('button');
+      unstageAllBtn.className = 'git-section-action';
+      unstageAllBtn.textContent = 'Unstage All';
+      unstageAllBtn.addEventListener('click', async () => {
+        const res = await window.nexo.gitUnstageAll(state.projectRoot);
+        if (!res.ok) alert(`Could not unstage all:\n${res.error || 'unknown error'}`);
+        refreshGitStatus();
+      });
+      t.appendChild(unstageAllBtn);
       body.appendChild(t);
       for (const entry of gitState.staged) body.appendChild(renderGitFileRow(entry, true));
     }
     if (gitState.unstaged.length) {
       const t = document.createElement('div');
       t.className = 'git-section-title';
-      t.textContent = `CHANGES (${gitState.unstaged.length})`;
+      t.innerHTML = `<span>CHANGES (${gitState.unstaged.length})</span>`;
+      const stageAllBtn = document.createElement('button');
+      stageAllBtn.className = 'git-section-action';
+      stageAllBtn.textContent = 'Stage All';
+      stageAllBtn.addEventListener('click', async () => {
+        const res = await window.nexo.gitStageAll(state.projectRoot);
+        if (!res.ok) alert(`Could not stage all:\n${res.error || 'unknown error'}`);
+        refreshGitStatus();
+      });
+      t.appendChild(stageAllBtn);
       body.appendChild(t);
       for (const entry of gitState.unstaged) body.appendChild(renderGitFileRow(entry, false));
     }
@@ -3015,7 +2795,7 @@ document.getElementById('conflict-both').addEventListener('click', () => resolve
 document.getElementById('conflict-next').addEventListener('click', jumpToNextConflict);
 
 // ---------------- Workspace / panel switching (activity rail) ----------------
-const FULL_WORKSPACES = { sites: 'workspace-sites', settings: 'workspace-settings' };
+const FULL_WORKSPACES = { settings: 'workspace-settings' };
 
 function switchRailView(view) {
   document.querySelectorAll('.rail-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
@@ -3081,9 +2861,6 @@ function renderSettingsPage() {
       <span class="swatch" style="background:${t.swatch}"></span><span>${t.label}</span>
     </div>
   `).join('');
-  const intervalOptions = [5, 10, 15, 30, 60, 120].map((m) =>
-    `<option value="${m}" ${uiState.defaultSiteInterval === m ? 'selected' : ''}>${m < 60 ? `${m}m` : `${m / 60}h`}</option>`
-  ).join('');
 
   page.innerHTML = `
     <h1 class="settings-title">Settings</h1>
@@ -3188,17 +2965,6 @@ function renderSettingsPage() {
           <button class="tbtn" id="snippet-cancel-btn">Cancel</button>
           <button class="tbtn primary" id="snippet-save-btn">Save Snippet</button>
         </div>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h2>Sites Monitor</h2>
-      <div class="settings-row">
-        <div>
-          <div class="settings-row-label">Default check interval</div>
-          <div class="settings-row-desc">Used automatically whenever you add a new site to monitor. Can still be changed per-site afterward.</div>
-        </div>
-        <div class="settings-control"><select class="settings-select" id="set-site-interval">${intervalOptions}</select></div>
       </div>
     </div>
 
@@ -3346,12 +3112,6 @@ function renderSettingsPage() {
     uiState.autoSaveDelayMs = val;
     e.target.value = val;
     window.nexo.setPrefs({ autoSaveDelayMs: val });
-  });
-
-  document.getElementById('set-site-interval').addEventListener('change', (e) => {
-    const val = Number(e.target.value) || 10;
-    uiState.defaultSiteInterval = val;
-    window.nexo.setPrefs({ defaultSiteInterval: val });
   });
 
   document.getElementById('set-custom-shell').addEventListener('change', (e) => {
@@ -3793,35 +3553,38 @@ async function runScript(name) {
 document.getElementById('btn-scripts-refresh').addEventListener('click', loadScripts);
 
 // ---------------- GitHub PRs / Issues panel ----------------
-let githubPanelState = { subtab: 'pulls', pulls: null, issues: null, pullsError: null, issuesError: null, error: null, loading: false };
+let githubPanelState = { subtab: 'pulls', pulls: null, issues: null, releases: null, pullsError: null, issuesError: null, releasesError: null, error: null, loading: false };
 
 async function loadGithubPanel() {
   const status = await window.nexo.hasGithubToken();
   if (!status.hasToken) {
-    githubPanelState = { ...githubPanelState, pulls: null, issues: null, error: 'not-connected', loading: false };
+    githubPanelState = { ...githubPanelState, pulls: null, issues: null, releases: null, error: 'not-connected', loading: false };
     renderGithubPanel();
     return;
   }
   if (!state.projectRoot) {
-    githubPanelState = { ...githubPanelState, pulls: null, issues: null, error: 'no-project', loading: false };
+    githubPanelState = { ...githubPanelState, pulls: null, issues: null, releases: null, error: 'no-project', loading: false };
     renderGithubPanel();
     return;
   }
   githubPanelState.loading = true;
   githubPanelState.error = null;
   renderGithubPanel();
-  const [pullsRes, issuesRes] = await Promise.all([
+  const [pullsRes, issuesRes, releasesRes] = await Promise.all([
     window.nexo.listGithubPulls(state.projectRoot),
     window.nexo.listGithubIssues(state.projectRoot),
+    window.nexo.listGithubReleases(state.projectRoot),
   ]);
   githubPanelState.loading = false;
-  if (!pullsRes.ok && !issuesRes.ok) {
-    githubPanelState.error = pullsRes.error || issuesRes.error;
+  if (!pullsRes.ok && !issuesRes.ok && !releasesRes.ok) {
+    githubPanelState.error = pullsRes.error || issuesRes.error || releasesRes.error;
   } else {
     githubPanelState.pulls = pullsRes.ok ? pullsRes.pulls : [];
     githubPanelState.issues = issuesRes.ok ? issuesRes.issues : [];
+    githubPanelState.releases = releasesRes.ok ? releasesRes.releases : [];
     githubPanelState.pullsError = pullsRes.ok ? null : pullsRes.error;
     githubPanelState.issuesError = issuesRes.ok ? null : issuesRes.error;
+    githubPanelState.releasesError = releasesRes.ok ? null : releasesRes.error;
   }
   renderGithubPanel();
 }
@@ -3829,10 +3592,11 @@ async function loadGithubPanel() {
 function renderGithubPanel() {
   document.getElementById('github-tab-pulls').classList.toggle('active', githubPanelState.subtab === 'pulls');
   document.getElementById('github-tab-issues').classList.toggle('active', githubPanelState.subtab === 'issues');
+  document.getElementById('github-tab-releases').classList.toggle('active', githubPanelState.subtab === 'releases');
   const body = document.getElementById('github-body');
 
   if (githubPanelState.error === 'not-connected') {
-    body.innerHTML = '<div class="git-empty">Connect a GitHub token in Settings to see PRs &amp; issues.</div>';
+    body.innerHTML = '<div class="git-empty">Connect a GitHub token in Settings to see PRs, issues &amp; releases.</div>';
     return;
   }
   if (githubPanelState.error === 'no-project') {
@@ -3845,6 +3609,11 @@ function renderGithubPanel() {
   }
   if (githubPanelState.error) {
     body.innerHTML = `<div class="git-empty">${escapeHtml(githubPanelState.error)}</div>`;
+    return;
+  }
+
+  if (githubPanelState.subtab === 'releases') {
+    renderReleasesSubtab(body);
     return;
   }
 
@@ -3867,9 +3636,63 @@ function renderGithubPanel() {
   });
 }
 
+function renderReleasesSubtab(body) {
+  if (githubPanelState.releasesError) {
+    body.innerHTML = `<div class="git-empty">${escapeHtml(githubPanelState.releasesError)}</div>`;
+    return;
+  }
+  const releases = githubPanelState.releases || [];
+  const listHtml = releases.length
+    ? releases.map((r) => `
+      <div class="gh-item-row" data-url="${escapeHtml(r.url)}">
+        <div class="gh-item-title">
+          ${r.draft ? '<span class="gh-draft-badge">Draft</span>' : ''}${r.prerelease ? '<span class="gh-draft-badge">Pre-release</span>' : ''}${escapeHtml(r.name)}
+        </div>
+        <div class="gh-item-meta">${escapeHtml(r.tagName)}${r.publishedAt ? ` · ${new Date(r.publishedAt).toLocaleDateString()}` : ''}</div>
+      </div>`).join('')
+    : '<div class="git-empty">No releases yet.</div>';
+  body.innerHTML = `<div class="gh-releases-actions"><button class="tbtn" id="gh-new-release-btn">+ New Release</button></div>${listHtml}`;
+  body.querySelectorAll('.gh-item-row').forEach((row) => {
+    row.addEventListener('click', () => window.nexo.openExternal(row.dataset.url));
+  });
+  document.getElementById('gh-new-release-btn').addEventListener('click', openCreateReleaseForm);
+}
+
+function openCreateReleaseForm() {
+  showModal({
+    title: 'Create GitHub Release',
+    fields: [
+      { id: 'tagName', placeholder: 'v1.0.0' },
+      { id: 'name', placeholder: 'Release title (optional — defaults to tag)', required: false },
+      { id: 'body', placeholder: 'Release notes (optional)', required: false },
+    ],
+    confirmLabel: 'Next',
+    onConfirm: ({ tagName, name, body }) => {
+      if (!tagName.trim()) return 'Tag name is required.';
+      setTimeout(() => continueCreateReleaseFlow(tagName.trim(), name.trim(), body), 50);
+      return null;
+    },
+  });
+}
+
+async function continueCreateReleaseFlow(tagName, name, body) {
+  const draft = confirm('Save as a draft (not published yet)?\n\nOK = draft, Cancel = publish immediately');
+  let prerelease = false;
+  if (!draft) prerelease = confirm('Mark this as a pre-release?\n\nOK = pre-release, Cancel = full release');
+  showUpdateToast('Creating release…', []);
+  const res = await window.nexo.createGithubRelease(state.projectRoot, {
+    tagName, name, body, draft, prerelease, targetCommitish: gitState.branch || undefined,
+  });
+  hideUpdateToast();
+  if (!res.ok) { alert(`Could not create release:\n${res.error}`); return; }
+  if (document.getElementById('panel-github').classList.contains('active')) loadGithubPanel();
+}
+
 document.getElementById('github-tab-pulls').addEventListener('click', () => { githubPanelState.subtab = 'pulls'; renderGithubPanel(); });
 document.getElementById('github-tab-issues').addEventListener('click', () => { githubPanelState.subtab = 'issues'; renderGithubPanel(); });
+document.getElementById('github-tab-releases').addEventListener('click', () => { githubPanelState.subtab = 'releases'; renderGithubPanel(); });
 document.getElementById('btn-github-refresh').addEventListener('click', loadGithubPanel);
+document.getElementById('btn-github-new-repo').addEventListener('click', handleCreateGithubRepo);
 
 // ---------------- Command Palette / Quick Open ----------------
 const paletteState = { mode: 'files', items: [], active: 0, filesCache: null };
@@ -3883,11 +3706,11 @@ const PALETTE_COMMANDS = [
   { label: 'Source Control', run: () => switchRailView('git') },
   { label: 'npm Scripts', run: () => switchRailView('scripts') },
   { label: 'Outline', run: () => switchRailView('outline') },
-  { label: 'Sites Monitor', run: () => switchRailView('sites') },
   { label: 'Settings', run: () => switchRailView('settings') },
   { label: 'GitHub', run: () => switchRailView('github') },
   { label: 'Browse GitHub Repos…', run: openGithubRepoPicker },
   { label: 'Create GitHub Repo…', run: handleCreateGithubRepo },
+  { label: 'Create GitHub Release…', run: () => { switchRailView('github'); githubPanelState.subtab = 'releases'; renderGithubPanel(); openCreateReleaseForm(); } },
   { label: 'Toggle Terminal', run: () => toggleTerminal() },
   { label: 'Toggle Split Editor', run: () => toggleSplit() },
   { label: 'Toggle Zen Mode', run: () => toggleZenMode() },
@@ -4043,7 +3866,6 @@ async function boot() {
   });
 
   refreshRecent();
-  loadSites();
   renderSettingsPage();
 
   // Tell the main process the UI has actually painted, so it can swap the

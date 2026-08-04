@@ -38,9 +38,6 @@
       <button class="rail-btn" id="rail-git" data-view="git" title="Source Control (Ctrl+Shift+G)">
         <span class="rail-icon">🌿</span><span class="rail-label">Git</span><span class="rail-badge hidden" id="rail-git-badge">0</span>
       </button>
-      <button class="rail-btn" id="rail-sites" data-view="sites" title="Sites Monitor &amp; SEO">
-        <span class="rail-icon">🌐</span><span class="rail-label">Sites</span>
-      </button>
       <button class="rail-btn" id="rail-scripts" data-view="scripts" title="npm Scripts">
         <span class="rail-icon">📜</span><span class="rail-label">Scripts</span>
       </button>
@@ -135,11 +132,15 @@
         <div id="panel-github" class="sidebar-panel">
           <div class="panel-header">
             <span>GITHUB</span>
-            <div id="github-actions"><button class="icon-btn" id="btn-github-refresh" title="Refresh">↻</button></div>
+            <div id="github-actions">
+              <button class="icon-btn" id="btn-github-new-repo" title="Create new repo">+</button>
+              <button class="icon-btn" id="btn-github-refresh" title="Refresh">↻</button>
+            </div>
           </div>
           <div id="github-subtabs">
             <button class="git-subtab active" id="github-tab-pulls" data-tab="pulls">Pull Requests</button>
             <button class="git-subtab" id="github-tab-issues" data-tab="issues">Issues</button>
+            <button class="git-subtab" id="github-tab-releases" data-tab="releases">Releases</button>
           </div>
           <div id="github-body"></div>
         </div>
@@ -163,6 +164,7 @@
                   <button class="welcome-btn" id="welcome-new">New Project</button>
                   <button class="welcome-btn" id="welcome-clone">Clone Repository</button>
                   <button class="welcome-btn" id="welcome-github-repos">Browse GitHub Repos</button>
+                  <button class="welcome-btn" id="welcome-github-create">Create GitHub Repo</button>
                 </div>
 
                 <div id="recent-section">
@@ -235,30 +237,6 @@
             <span id="status-pos"></span>
           </span>
         </div>
-      </div>
-    </div>
-
-    <!-- ===================== Sites workspace (monitoring + SEO) ===================== -->
-    <div id="workspace-sites" class="workspace">
-      <div id="sites-sidebar">
-        <div class="sidebar-header-static">
-          <span>MONITORED SITES</span>
-          <div class="sidebar-actions-static">
-            <button class="icon-btn" id="btn-add-site" title="Add Site">＋ site</button>
-          </div>
-        </div>
-        <div id="sites-list"></div>
-        <div id="sites-list-empty" class="muted" style="padding:14px;">No sites yet. Add one to start monitoring uptime and running SEO audits.</div>
-      </div>
-      <div id="sites-main">
-        <div id="sites-welcome">
-          <div class="welcome-inner">
-            <h1><span class="brand-nexo">Site</span><span class="brand-dev">Monitor</span></h1>
-            <p class="tagline">Track uptime and run SEO audits on any website.</p>
-            <button class="welcome-btn primary" id="sites-welcome-add">Add a Site</button>
-          </div>
-        </div>
-        <div id="site-detail" style="display:none;"></div>
       </div>
     </div>
 

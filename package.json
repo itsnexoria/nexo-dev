@@ -1,7 +1,7 @@
 {
   "name": "nexo-dev",
   "productName": "Nexo Dev",
-  "version": "1.0.5",
+  "version": "1.0.3",
   "description": "A lightweight code editor and project manager for Windows.",
   "main": "main.js",
   "author": "Nexus",

@@ -1,7 +1,6 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell, Notification, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const http = require('http');
 const https = require('https');
 const { execFile, spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
@@ -46,208 +45,6 @@ app.on('second-instance', (event, argv) => {
     if (p) mainWindow.webContents.send('open-path', p);
   }
 });
-
-// ---------- HTTP fetch helper (no external deps, used for site monitoring + SEO audits) ----------
-function fetchUrl(targetUrl, { method = 'GET', timeoutMs = 12000, maxRedirects = 4 } = {}) {
-  return new Promise((resolve) => {
-    const attempt = (u, redirectsLeft) => {
-      let parsed;
-      try {
-        parsed = new URL(u);
-      } catch {
-        return resolve({ ok: false, error: 'Invalid URL' });
-      }
-      const lib = parsed.protocol === 'https:' ? https : http;
-      const start = Date.now();
-      let settled = false;
-
-      const req = lib.request(
-        parsed,
-        {
-          method,
-          timeout: timeoutMs,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; NexoDevMonitor/1.0; +https://nexorealm.org)',
-            Accept: 'text/html,application/xhtml+xml,*/*',
-          },
-        },
-        (res) => {
-          const chunks = [];
-          let total = 0;
-          res.on('data', (c) => {
-            total += c.length;
-            if (total < 3_000_000) chunks.push(c);
-          });
-          res.on('end', () => {
-            if (settled) return;
-            settled = true;
-            const ms = Date.now() - start;
-            const status = res.statusCode;
-            if ([301, 302, 303, 307, 308].includes(status) && res.headers.location && redirectsLeft > 0) {
-              const nextUrl = new URL(res.headers.location, parsed).toString();
-              return attempt(nextUrl, redirectsLeft - 1);
-            }
-            resolve({
-              ok: status >= 200 && status < 400,
-              status,
-              ms,
-              finalUrl: parsed.toString(),
-              headers: res.headers,
-              body: Buffer.concat(chunks).toString('utf-8'),
-            });
-          });
-        }
-      );
-      req.on('timeout', () => {
-        if (settled) return;
-        settled = true;
-        req.destroy();
-        resolve({ ok: false, error: 'Request timed out', ms: timeoutMs });
-      });
-      req.on('error', (err) => {
-        if (settled) return;
-        settled = true;
-        resolve({ ok: false, error: err.message, ms: Date.now() - start });
-      });
-      req.end();
-    };
-    attempt(targetUrl, maxRedirects);
-  });
-}
-
-// ---------- Lightweight regex-based HTML analysis for SEO audits ----------
-function extractMetaContent(html, name) {
-  const tags = html.match(/<meta\b[^>]*>/gi) || [];
-  for (const tag of tags) {
-    if (new RegExp(`name=["']${name}["']`, 'i').test(tag)) {
-      const m = tag.match(/content=["']([^"']*)["']/i);
-      if (m) return m[1];
-    }
-  }
-  return null;
-}
-
-function extractCanonical(html) {
-  const tags = html.match(/<link\b[^>]*>/gi) || [];
-  for (const tag of tags) {
-    if (/rel=["']canonical["']/i.test(tag)) {
-      const m = tag.match(/href=["']([^"']*)["']/i);
-      if (m) return m[1];
-    }
-  }
-  return null;
-}
-
-function analyzeImages(html) {
-  const tags = html.match(/<img\b[^>]*>/gi) || [];
-  let missingAlt = 0;
-  for (const tag of tags) {
-    const m = tag.match(/alt=["']([^"']*)["']/i);
-    if (!m || !m[1].trim()) missingAlt++;
-  }
-  return { total: tags.length, missingAlt };
-}
-
-async function runSeoAudit(siteUrl) {
-  const pageRes = await fetchUrl(siteUrl, { method: 'GET' });
-  if (!pageRes.ok) {
-    return { ok: false, error: pageRes.error || `Page returned status ${pageRes.status}`, auditedAt: Date.now() };
-  }
-
-  const html = pageRes.body || '';
-  const origin = new URL(pageRes.finalUrl).origin;
-  const breakdown = [];
-  let score = 0;
-
-  const add = (key, label, points, max, detail) => {
-    breakdown.push({ key, label, pass: points >= max * 0.7, points, max, detail });
-    score += points;
-  };
-
-  // Title
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
-  if (!title) add('title', 'Title tag', 0, 10, 'No <title> tag found.');
-  else if (title.length < 10) add('title', 'Title tag', 4, 10, `Title is very short (${title.length} chars): "${title}"`);
-  else if (title.length > 65) add('title', 'Title tag', 5, 10, `Title may get truncated in search results (${title.length} chars): "${title}"`);
-  else add('title', 'Title tag', 10, 10, `"${title}" — ${title.length} chars, good length.`);
-
-  // Meta description
-  const desc = extractMetaContent(html, 'description');
-  if (!desc) add('description', 'Meta description', 0, 10, 'No meta description found.');
-  else if (desc.length < 50) add('description', 'Meta description', 5, 10, `Description is short (${desc.length} chars).`);
-  else if (desc.length > 160) add('description', 'Meta description', 6, 10, `Description may get truncated (${desc.length} chars).`);
-  else add('description', 'Meta description', 10, 10, `${desc.length} chars — good length.`);
-
-  // H1
-  const h1s = html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/gi) || [];
-  if (h1s.length === 0) add('h1', 'H1 heading', 0, 10, 'No H1 tag found.');
-  else if (h1s.length === 1) add('h1', 'H1 heading', 10, 10, 'Exactly one H1 tag — ideal.');
-  else add('h1', 'H1 heading', 5, 10, `${h1s.length} H1 tags found — should usually be exactly one.`);
-
-  // Image alt coverage
-  const imgs = analyzeImages(html);
-  if (imgs.total === 0) add('images', 'Image alt text', 10, 10, 'No images on the page.');
-  else {
-    const covered = imgs.total - imgs.missingAlt;
-    const pts = Math.round((covered / imgs.total) * 10);
-    add('images', 'Image alt text', pts, 10, `${covered}/${imgs.total} images have alt text.`);
-  }
-
-  // Canonical
-  const canonical = extractCanonical(html);
-  if (canonical) add('canonical', 'Canonical tag', 10, 10, `Points to ${canonical}`);
-  else add('canonical', 'Canonical tag', 0, 10, 'No canonical link tag found.');
-
-  // Viewport
-  const viewport = extractMetaContent(html, 'viewport');
-  if (viewport) add('viewport', 'Mobile viewport tag', 10, 10, 'Viewport meta tag present.');
-  else add('viewport', 'Mobile viewport tag', 0, 10, 'No viewport meta tag — page may not be mobile-friendly.');
-
-  // HTTPS
-  if (origin.startsWith('https://')) add('https', 'HTTPS', 10, 10, 'Site is served over HTTPS.');
-  else add('https', 'HTTPS', 0, 10, 'Site is not served over HTTPS.');
-
-  // robots.txt
-  const robots = await fetchUrl(`${origin}/robots.txt`, { method: 'GET', timeoutMs: 8000 });
-  if (robots.ok) add('robots', 'robots.txt', 10, 10, 'Found and reachable.');
-  else add('robots', 'robots.txt', 0, 10, 'Not found at /robots.txt.');
-
-  // sitemap.xml
-  const sitemap = await fetchUrl(`${origin}/sitemap.xml`, { method: 'GET', timeoutMs: 8000 });
-  if (sitemap.ok) add('sitemap', 'sitemap.xml', 10, 10, 'Found and reachable.');
-  else add('sitemap', 'sitemap.xml', 0, 10, 'Not found at /sitemap.xml.');
-
-  // Response time
-  if (pageRes.ms <= 1500) add('speed', 'Response time', 10, 10, `${pageRes.ms}ms — fast.`);
-  else if (pageRes.ms <= 3500) add('speed', 'Response time', 5, 10, `${pageRes.ms}ms — could be faster.`);
-  else add('speed', 'Response time', 0, 10, `${pageRes.ms}ms — slow.`);
-
-  return { ok: true, score, breakdown, finalUrl: pageRes.finalUrl, auditedAt: Date.now() };
-}
-
-// ---------- Monitored sites store ----------
-const sitesFilePath = () => path.join(app.getPath('userData'), 'monitored-sites.json');
-
-function readSites() {
-  try {
-    return JSON.parse(fs.readFileSync(sitesFilePath(), 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-function writeSites(list) {
-  try {
-    fs.writeFileSync(sitesFilePath(), JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write sites:', err);
-  }
-}
-function normalizeUrl(input) {
-  let u = input.trim();
-  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
-  return u;
-}
 
 // ---------- Global text search across project files ----------
 const SEARCH_IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache', 'out', 'coverage']);
@@ -448,7 +245,6 @@ const DEFAULT_PREFS = {
   bracketGuides: false,
   autoSave: false,
   autoSaveDelayMs: 1000,
-  defaultSiteInterval: 10,
   customShell: '',
   customTheme: { bg: '#0c0c10', text: '#ececf0', accent: '#ff3b30' },
   customThemes: [], // saved named presets: [{ id, name, bg, text, accent }]
@@ -487,9 +283,6 @@ function sanitizePrefsPartial(partial) {
   if (partial.autoSave !== undefined) clean.autoSave = !!partial.autoSave;
   if (partial.autoSaveDelayMs !== undefined) {
     clean.autoSaveDelayMs = Math.max(200, Math.min(10000, Number(partial.autoSaveDelayMs) || 1000));
-  }
-  if (partial.defaultSiteInterval !== undefined) {
-    clean.defaultSiteInterval = Math.max(1, Math.min(1440, Number(partial.defaultSiteInterval) || 10));
   }
   if (partial.customShell !== undefined) clean.customShell = String(partial.customShell).trim().slice(0, 500);
   if (partial.customTheme !== undefined && typeof partial.customTheme === 'object' && partial.customTheme) {
@@ -742,7 +535,6 @@ ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall(); });
 app.whenReady().then(() => {
   createSplash();
   createWindow();
-  startMonitorScheduler();
   const initialPath = extractPathFromArgv(process.argv);
   if (initialPath) pendingOpenPath = initialPath;
 
@@ -1273,6 +1065,43 @@ ipcMain.handle('github:get-user', async () => {
 ipcMain.handle('github:clear-token', () => { clearGithubToken(); return { ok: true }; });
 ipcMain.handle('github:has-token', () => ({ hasToken: !!readGithubToken() }));
 
+ipcMain.handle('github:list-releases', async (evt, projectRoot) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const or = await getGithubOwnerRepo(root);
+  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
+  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/releases?per_page=50`);
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    releases: res.data.map((r) => ({
+      id: r.id, tagName: r.tag_name, name: r.name || r.tag_name, body: r.body || '',
+      draft: r.draft, prerelease: r.prerelease, url: r.html_url, publishedAt: r.published_at || r.created_at,
+    })),
+  };
+});
+
+ipcMain.handle('github:create-release', async (evt, projectRoot, opts) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const or = await getGithubOwnerRepo(root);
+  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
+  if (!opts || !opts.tagName || !opts.tagName.trim()) return { ok: false, error: 'Tag name is required.' };
+  const body = {
+    tag_name: opts.tagName.trim(),
+    name: (opts.name || opts.tagName).trim(),
+    body: opts.body || '',
+    draft: !!opts.draft,
+    prerelease: !!opts.prerelease,
+  };
+  // If the tag doesn't exist yet, GitHub creates it automatically pointed at
+  // this commitish — same behavior as typing a new tag in the web UI.
+  if (opts.targetCommitish) body.target_commitish = opts.targetCommitish;
+  const res = await githubApiRequest('POST', `/repos/${or.owner}/${or.repo}/releases`, body);
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true, release: { url: res.data.html_url, tagName: res.data.tag_name } };
+});
+
 ipcMain.handle('github:list-repos', async () => {
   const res = await githubApiRequest('GET', '/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member');
   if (!res.ok) return { ok: false, error: res.error };
@@ -1439,10 +1268,24 @@ ipcMain.handle('git:stage', async (evt, projectRoot, relPath) => {
   return { ok: res.ok, error: res.ok ? null : res.stderr };
 });
 
+ipcMain.handle('git:stage-all', async (evt, projectRoot) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const res = await runGit(['add', '-A'], root);
+  return { ok: res.ok, error: res.ok ? null : res.stderr };
+});
+
 ipcMain.handle('git:unstage', async (evt, projectRoot, relPath) => {
   const root = await getGitRoot(projectRoot);
   if (!root) return { ok: false, error: 'Not a git repository.' };
   const res = await runGit(['reset', '--', relPath], root);
+  return { ok: res.ok, error: res.ok ? null : res.stderr };
+});
+
+ipcMain.handle('git:unstage-all', async (evt, projectRoot) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const res = await runGit(['reset'], root);
   return { ok: res.ok, error: res.ok ? null : res.stderr };
 });
 
@@ -1554,120 +1397,3 @@ ipcMain.handle('git:pull', async (evt, projectRoot) => {
   return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Pull failed.') };
 });
 
-// ---------- IPC: monitored sites ----------
-ipcMain.handle('sites:get', () => readSites());
-
-ipcMain.handle('sites:add', (evt, rawUrl, name) => {
-  const url = normalizeUrl(rawUrl);
-  const list = readSites();
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const site = {
-    id,
-    url,
-    name: name && name.trim() ? name.trim() : new URL(url).hostname,
-    addedAt: Date.now(),
-    lastCheck: null,
-    lastAudit: null,
-    intervalMinutes: readPrefs().defaultSiteInterval,
-    history: [],
-    auditHistory: [],
-  };
-  list.unshift(site);
-  writeSites(list);
-  return list;
-});
-
-ipcMain.handle('sites:remove', (evt, id) => {
-  const list = readSites().filter((s) => s.id !== id);
-  writeSites(list);
-  return list;
-});
-
-const HISTORY_CAP = 50;
-const AUDIT_HISTORY_CAP = 30;
-
-async function checkSiteById(id, list) {
-  const site = list.find((s) => s.id === id);
-  if (!site) return null;
-  const result = await fetchUrl(site.url, { method: 'GET', timeoutMs: 12000 });
-  const wasOk = site.lastCheck ? site.lastCheck.ok : null;
-  site.lastCheck = {
-    ok: result.ok,
-    status: result.status || null,
-    ms: result.ms || null,
-    error: result.error || null,
-    checkedAt: Date.now(),
-  };
-  if (!site.history) site.history = [];
-  site.history.push({ ts: site.lastCheck.checkedAt, ok: result.ok, status: result.status || null, ms: result.ms || null });
-  if (site.history.length > HISTORY_CAP) site.history = site.history.slice(-HISTORY_CAP);
-  return { site, statusChanged: wasOk !== null && wasOk !== result.ok };
-}
-
-ipcMain.handle('sites:check', async (evt, id) => {
-  const list = readSites();
-  const res = await checkSiteById(id, list);
-  if (!res) return null;
-  writeSites(list);
-  return res.site;
-});
-
-ipcMain.handle('sites:audit', async (evt, id) => {
-  const list = readSites();
-  const site = list.find((s) => s.id === id);
-  if (!site) return null;
-  const report = await runSeoAudit(site.url);
-  site.lastAudit = report;
-  if (report.ok) {
-    if (!site.auditHistory) site.auditHistory = [];
-    site.auditHistory.push({ ts: report.auditedAt, score: report.score });
-    if (site.auditHistory.length > AUDIT_HISTORY_CAP) site.auditHistory = site.auditHistory.slice(-AUDIT_HISTORY_CAP);
-  }
-  writeSites(list);
-  return site;
-});
-
-ipcMain.handle('sites:set-interval', (evt, id, minutes) => {
-  const list = readSites();
-  const site = list.find((s) => s.id === id);
-  if (!site) return list;
-  site.intervalMinutes = Math.max(1, Math.min(1440, Number(minutes) || 10));
-  writeSites(list);
-  return list;
-});
-
-// ---------- Background monitoring scheduler ----------
-// Runs while the app is open (any window) and checks each site on its own
-// interval, independent of which workspace/tab is focused. Fires a native
-// notification when a site's up/down status flips.
-let schedulerTimer = null;
-function startMonitorScheduler() {
-  if (schedulerTimer) return;
-  schedulerTimer = setInterval(async () => {
-    const list = readSites();
-    if (!list.length) return;
-    const now = Date.now();
-    let changed = false;
-    for (const site of list) {
-      const dueAt = site.lastCheck ? site.lastCheck.checkedAt + (site.intervalMinutes || 10) * 60000 : 0;
-      if (now < dueAt) continue;
-      const res = await checkSiteById(site.id, list);
-      if (!res) continue;
-      changed = true;
-      if (res.statusChanged && Notification.isSupported()) {
-        const n = new Notification({
-          title: res.site.lastCheck.ok ? `${res.site.name} is back up` : `${res.site.name} is down`,
-          body: res.site.lastCheck.ok
-            ? `Responded with status ${res.site.lastCheck.status} in ${res.site.lastCheck.ms}ms.`
-            : (res.site.lastCheck.error || `Status ${res.site.lastCheck.status}`),
-          icon: APP_ICON,
-        });
-        n.show();
-      }
-    }
-    if (changed) {
-      writeSites(list);
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('sites:updated', list);
-    }
-  }, 30_000); // check which sites are due every 30s
-}
