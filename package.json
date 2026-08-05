@@ -2,7 +2,7 @@
   "name": "nexo-dev",
   "productName": "Nexo Dev",
   "version": "1.0.3",
-  "description": "A lightweight code editor and project manager for Windows.",
+  "description": "A lightweight code editor and project manager.",
   "main": "main.js",
   "author": "Nexus",
   "license": "MIT",
@@ -10,7 +10,9 @@
     "start": "electron .",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
-    "release": "electron-builder --win --publish always"
+    "dist:linux": "electron-builder --linux",
+    "release": "electron-builder --win --publish always",
+    "release:linux": "electron-builder --linux --publish always"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -59,6 +61,26 @@
         }
       ],
       "icon": "renderer/icons/icon.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "renderer/icons/logo-256.png",
+      "category": "Development",
+      "maintainer": "Nexus <support@nexorealm.org>",
+      "synopsis": "A lightweight code editor and project manager."
     },
     "nsis": {
       "oneClick": false,
