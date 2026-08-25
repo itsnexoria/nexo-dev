@@ -1210,7 +1210,7 @@ function showModal({ title, fields, confirmLabel = 'Create', onConfirm }) {
     }
     const inp = document.createElement('input');
     inp.id = `modal-field-${f.id}`;
-    inp.type = 'text';
+    inp.type = f.type || 'text';
     inp.autocomplete = 'off';
     inp.spellcheck = false;
     inp.placeholder = f.placeholder || '';
@@ -3688,11 +3688,98 @@ async function continueCreateReleaseFlow(tagName, name, body) {
   if (document.getElementById('panel-github').classList.contains('active')) loadGithubPanel();
 }
 
+// ---------------- Cloudflare Pages deploy scaffolding ----------------
+function handleSetupCloudflareDeploy() {
+  window.nexo.hasGithubToken().then((status) => {
+    if (!status.hasToken) { alert("Connect a GitHub token in Settings first — it's needed to set the deploy secrets on your repo."); return; }
+    if (!state.projectRoot) { alert('Open a project first.'); return; }
+    showModal({
+      title: 'Set Up Cloudflare Pages Deploy',
+      fields: [
+        { id: 'projectName', label: 'Cloudflare Pages project name', placeholder: 'my-site' },
+        { id: 'buildDir', label: 'Build output directory', placeholder: 'dist (use . for a static site with no build step)' },
+        { id: 'apiToken', label: 'Cloudflare API Token', placeholder: 'Paste your Cloudflare API token', type: 'password' },
+        { id: 'accountId', label: 'Cloudflare Account ID', placeholder: 'Found in your Cloudflare dashboard sidebar' },
+      ],
+      confirmLabel: 'Set Up',
+      onConfirm: ({ projectName, buildDir, apiToken, accountId }) => {
+        setTimeout(() => continueCloudflareDeploySetup(projectName, buildDir, apiToken, accountId), 50);
+        return null;
+      },
+    });
+  });
+}
+
+function buildCloudflarePagesWorkflowYaml(projectName, buildDir, branch) {
+  return `name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches: [${branch}]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; \\
+          elif [ -f package.json ]; then npm install; \\
+          else echo "No package.json — nothing to install."; fi
+
+      - name: Build
+        run: npm run build --if-present
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: \${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy ${buildDir} --project-name=${projectName}
+`;
+}
+
+async function continueCloudflareDeploySetup(projectName, buildDir, apiToken, accountId) {
+  showUpdateToast('Setting up Cloudflare Pages deploy…', []);
+  const secretsToSet = [['CLOUDFLARE_API_TOKEN', apiToken], ['CLOUDFLARE_ACCOUNT_ID', accountId]];
+  for (const [name, value] of secretsToSet) {
+    const res = await window.nexo.setGithubSecret(state.projectRoot, name, value);
+    if (!res.ok) {
+      hideUpdateToast();
+      alert(`Could not set the ${name} secret on GitHub:\n${res.error}\n\nMake sure your GitHub token has permission to manage Actions secrets for this repo (classic tokens need the full "repo" scope).`);
+      return;
+    }
+  }
+  const branch = gitState.branch || 'main';
+  const yaml = buildCloudflarePagesWorkflowYaml(projectName, buildDir, branch);
+  const sep = state.projectRoot.includes('\\') ? '\\' : '/';
+  const workflowPath = `${state.projectRoot}${sep}.github${sep}workflows${sep}deploy-cloudflare-pages.yml`;
+  const writeRes = await window.nexo.writeFile(workflowPath, yaml);
+  hideUpdateToast();
+  if (!writeRes.ok) { alert(`Secrets were set on GitHub, but the workflow file couldn't be written:\n${writeRes.error}`); return; }
+  renderTree();
+  const openNow = confirm(`Done! Created .github/workflows/deploy-cloudflare-pages.yml and set your Cloudflare secrets on GitHub.\n\nCommit and push this file to enable auto-deploys on every push to "${branch}".\n\nOpen the workflow file now?`);
+  if (openNow) openFile(workflowPath);
+}
+
 document.getElementById('github-tab-pulls').addEventListener('click', () => { githubPanelState.subtab = 'pulls'; renderGithubPanel(); });
 document.getElementById('github-tab-issues').addEventListener('click', () => { githubPanelState.subtab = 'issues'; renderGithubPanel(); });
 document.getElementById('github-tab-releases').addEventListener('click', () => { githubPanelState.subtab = 'releases'; renderGithubPanel(); });
 document.getElementById('btn-github-refresh').addEventListener('click', loadGithubPanel);
 document.getElementById('btn-github-new-repo').addEventListener('click', handleCreateGithubRepo);
+document.getElementById('btn-cloudflare-deploy').addEventListener('click', handleSetupCloudflareDeploy);
 
 // ---------------- Command Palette / Quick Open ----------------
 const paletteState = { mode: 'files', items: [], active: 0, filesCache: null };
@@ -3711,6 +3798,7 @@ const PALETTE_COMMANDS = [
   { label: 'Browse GitHub Repos…', run: openGithubRepoPicker },
   { label: 'Create GitHub Repo…', run: handleCreateGithubRepo },
   { label: 'Create GitHub Release…', run: () => { switchRailView('github'); githubPanelState.subtab = 'releases'; renderGithubPanel(); openCreateReleaseForm(); } },
+  { label: 'Set Up Cloudflare Pages Deploy…', run: handleSetupCloudflareDeploy },
   { label: 'Toggle Terminal', run: () => toggleTerminal() },
   { label: 'Toggle Split Editor', run: () => toggleSplit() },
   { label: 'Toggle Zen Mode', run: () => toggleZenMode() },

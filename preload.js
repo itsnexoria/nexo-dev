@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('nexo', {
   listGithubIssues: (projectRoot) => ipcRenderer.invoke('github:list-issues', projectRoot),
   listGithubReleases: (projectRoot) => ipcRenderer.invoke('github:list-releases', projectRoot),
   createGithubRelease: (projectRoot, opts) => ipcRenderer.invoke('github:create-release', projectRoot, opts),
+  setGithubSecret: (projectRoot, secretName, secretValue) => ipcRenderer.invoke('github:set-secret', projectRoot, secretName, secretValue),
   lintFile: (projectRoot, filePath, content) => ipcRenderer.invoke('eslint:lint', projectRoot, filePath, content),
 
   // external file-change watching

@@ -4,6 +4,7 @@ const fs = require('fs');
 const https = require('https');
 const { execFile, spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
+const sodium = require('libsodium-wrappers');
 
 // Only one instance of the app should ever run — if a file/folder is opened
 // via "Open with Nexo Dev" while the app is already running, Windows just
@@ -720,6 +721,7 @@ const SELF_WRITE_GUARD_MS = 1000;
 
 ipcMain.handle('fs:write-file', async (evt, filePath, content) => {
   try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
     recentWrites.set(filePath, Date.now());
     return { ok: true };
@@ -1100,6 +1102,40 @@ ipcMain.handle('github:create-release', async (evt, projectRoot, opts) => {
   const res = await githubApiRequest('POST', `/repos/${or.owner}/${or.repo}/releases`, body);
   if (!res.ok) return { ok: false, error: res.error };
   return { ok: true, release: { url: res.data.html_url, tagName: res.data.tag_name } };
+});
+
+// Encrypts a value for a GitHub Actions secret using libsodium's sealed-box
+// scheme against the repo's public key — this is GitHub's documented
+// requirement for the Actions secrets API (crypto_box_seal), not a arbitrary
+// choice. The plaintext secret is never sent to GitHub or written to disk —
+// only the sealed ciphertext leaves this function.
+async function encryptSecretForGithub(publicKeyBase64, secretValue) {
+  await sodium.ready;
+  const keyBytes = sodium.from_base64(publicKeyBase64, sodium.base64_variants.ORIGINAL);
+  const messageBytes = sodium.from_string(secretValue);
+  const sealedBytes = sodium.crypto_box_seal(messageBytes, keyBytes);
+  return sodium.to_base64(sealedBytes, sodium.base64_variants.ORIGINAL);
+}
+
+ipcMain.handle('github:set-secret', async (evt, projectRoot, secretName, secretValue) => {
+  const root = await getGitRoot(projectRoot);
+  if (!root) return { ok: false, error: 'Not a git repository.' };
+  const or = await getGithubOwnerRepo(root);
+  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
+  const keyRes = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/actions/secrets/public-key`);
+  if (!keyRes.ok) return { ok: false, error: keyRes.error };
+  let encrypted;
+  try {
+    encrypted = await encryptSecretForGithub(keyRes.data.key, secretValue);
+  } catch (err) {
+    return { ok: false, error: `Could not encrypt secret: ${err.message}` };
+  }
+  const putRes = await githubApiRequest('PUT', `/repos/${or.owner}/${or.repo}/actions/secrets/${encodeURIComponent(secretName)}`, {
+    encrypted_value: encrypted,
+    key_id: keyRes.data.key_id,
+  });
+  if (!putRes.ok) return { ok: false, error: putRes.error };
+  return { ok: true };
 });
 
 ipcMain.handle('github:list-repos', async () => {

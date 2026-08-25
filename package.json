@@ -2,6 +2,7 @@
   "name": "nexo-dev",
   "productName": "Nexo Dev",
   "version": "1.0.3",
+  "homepage": "https://nexorealm.org",
   "description": "A lightweight code editor and project manager.",
   "main": "main.js",
   "author": "Nexus",
@@ -21,6 +22,7 @@
   "dependencies": {
     "dompurify": "^3.4.12",
     "electron-updater": "^6.8.9",
+    "libsodium-wrappers": "^0.8.4",
     "marked": "^18.0.7",
     "monaco-editor": "^0.50.0"
   },
@@ -37,7 +39,9 @@
       "!node_modules/monaco-editor/esm",
       "!node_modules/monaco-editor/dev",
       "node_modules/marked/lib/marked.umd.js",
-      "node_modules/dompurify/dist/purify.min.js"
+      "node_modules/dompurify/dist/purify.min.js",
+      "node_modules/libsodium-wrappers/**/*",
+      "node_modules/libsodium/**/*"
     ],
     "publish": {
       "provider": "github",
@@ -77,7 +81,6 @@
           ]
         }
       ],
-      "icon": "renderer/icons/logo-256.png",
       "category": "Development",
       "maintainer": "Nexus <support@nexorealm.org>",
       "synopsis": "A lightweight code editor and project manager."
