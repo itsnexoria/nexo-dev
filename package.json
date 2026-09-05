@@ -1,7 +1,7 @@
 {
   "name": "nexo-dev",
   "productName": "Nexo Dev",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "homepage": "https://nexorealm.org",
   "description": "A lightweight code editor and project manager.",
   "main": "main.js",
@@ -24,12 +24,16 @@
     "electron-updater": "^6.8.9",
     "libsodium-wrappers": "^0.8.4",
     "marked": "^18.0.7",
-    "monaco-editor": "^0.50.0"
+    "monaco-editor": "^0.50.0",
+    "monaco-vim": "^0.4.4"
   },
   "build": {
     "appId": "com.nexorealm.nexodev",
     "productName": "Nexo Dev",
     "asar": false,
+    "directories": {
+      "buildResources": "build"
+    },
     "files": [
       "main.js",
       "preload.js",
@@ -41,7 +45,8 @@
       "node_modules/marked/lib/marked.umd.js",
       "node_modules/dompurify/dist/purify.min.js",
       "node_modules/libsodium-wrappers/**/*",
-      "node_modules/libsodium/**/*"
+      "node_modules/libsodium/**/*",
+      "node_modules/monaco-vim/dist/monaco-vim.umd.js"
     ],
     "publish": {
       "provider": "github",

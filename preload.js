@@ -45,6 +45,11 @@ contextBridge.exposeInMainWorld('nexo', {
   createGithubRelease: (projectRoot, opts) => ipcRenderer.invoke('github:create-release', projectRoot, opts),
   setGithubSecret: (projectRoot, secretName, secretValue) => ipcRenderer.invoke('github:set-secret', projectRoot, secretName, secretValue),
   lintFile: (projectRoot, filePath, content) => ipcRenderer.invoke('eslint:lint', projectRoot, filePath, content),
+  checkOutdated: (projectRoot) => ipcRenderer.invoke('npm:outdated', projectRoot),
+  formatWithPrettier: (projectRoot, filePath, content) => ipcRenderer.invoke('prettier:format', projectRoot, filePath, content),
+  scanTodos: (projectRoot) => ipcRenderer.invoke('todos:scan', projectRoot),
+  getRecentFiles: () => ipcRenderer.invoke('recent-files:get'),
+  addRecentFile: (filePath, projectRoot) => ipcRenderer.invoke('recent-files:add', filePath, projectRoot),
 
   // external file-change watching
   watchFile: (filePath) => ipcRenderer.invoke('watch:start', filePath),

@@ -237,6 +237,34 @@ function addRecent(folderPath) {
   return list;
 }
 
+const recentFilesPath = () => path.join(app.getPath('userData'), 'recent-files.json');
+
+function readRecentFiles() {
+  try {
+    return JSON.parse(fs.readFileSync(recentFilesPath(), 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentFiles(list) {
+  try {
+    fs.writeFileSync(recentFilesPath(), JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write recent files:', err);
+  }
+}
+
+function addRecentFile(filePath, projectRoot) {
+  let list = readRecentFiles().filter((f) => f.path !== filePath);
+  list.unshift({ path: filePath, projectRoot: projectRoot || null, openedAt: Date.now() });
+  list = list.slice(0, 40);
+  writeRecentFiles(list);
+}
+
+ipcMain.handle('recent-files:get', () => readRecentFiles());
+ipcMain.handle('recent-files:add', (evt, filePath, projectRoot) => { addRecentFile(filePath, projectRoot); return { ok: true }; });
+
 // ---------- Preferences store (all user settings) ----------
 const DEFAULT_PREFS = {
   theme: 'dark',
@@ -244,6 +272,8 @@ const DEFAULT_PREFS = {
   minimap: true,
   wordWrap: false,
   bracketGuides: false,
+  vimMode: false,
+  formatOnSave: false,
   autoSave: false,
   autoSaveDelayMs: 1000,
   customShell: '',
@@ -281,6 +311,8 @@ function sanitizePrefsPartial(partial) {
   if (partial.minimap !== undefined) clean.minimap = !!partial.minimap;
   if (partial.wordWrap !== undefined) clean.wordWrap = !!partial.wordWrap;
   if (partial.bracketGuides !== undefined) clean.bracketGuides = !!partial.bracketGuides;
+  if (partial.vimMode !== undefined) clean.vimMode = !!partial.vimMode;
+  if (partial.formatOnSave !== undefined) clean.formatOnSave = !!partial.formatOnSave;
   if (partial.autoSave !== undefined) clean.autoSave = !!partial.autoSave;
   if (partial.autoSaveDelayMs !== undefined) {
     clean.autoSaveDelayMs = Math.max(200, Math.min(10000, Number(partial.autoSaveDelayMs) || 1000));
@@ -833,6 +865,27 @@ ipcMain.handle('fs:move', async (evt, sourcePath, destDir) => {
 ipcMain.handle('shell:open-external', (evt, url) => shell.openExternal(url));
 
 // ---------- IPC: global search ----------
+ipcMain.handle('todos:scan', async (evt, projectRoot) => {
+  if (!projectRoot) return { ok: false, error: 'No project open.' };
+  const results = { matches: [], matchedFiles: 0 };
+  const pattern = '\\b(TODO|FIXME|HACK)\\b:?\\s*(.*)';
+  walkForSearch(projectRoot, pattern, false, results, {}, true);
+  const tagRe = /\b(TODO|FIXME|HACK)\b:?\s*(.*)/i;
+  const todos = [];
+  for (const fileMatch of results.matches) {
+    for (const m of fileMatch.matches) {
+      const tagMatch = m.preview.match(tagRe);
+      todos.push({
+        path: fileMatch.path,
+        line: m.line,
+        tag: tagMatch ? tagMatch[1].toUpperCase() : 'TODO',
+        text: tagMatch ? tagMatch[2].trim() : m.preview,
+      });
+    }
+  }
+  return { ok: true, todos, truncated: results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES };
+});
+
 ipcMain.handle('search:text', async (evt, rootPath, query, opts = {}) => {
   if (!query || !query.trim()) return { matches: [], truncated: false };
   if (opts.useRegex) {
@@ -1190,11 +1243,68 @@ ipcMain.handle('github:list-issues', async (evt, projectRoot) => {
   };
 });
 
+function findLocalPrettierBin(root) {
+  const bin = process.platform === 'win32' ? 'prettier.cmd' : 'prettier';
+  const p = path.join(root, 'node_modules', '.bin', bin);
+  return fs.existsSync(p) ? p : null;
+}
+
+ipcMain.handle('prettier:format', async (evt, projectRoot, filePath, content) => {
+  if (!projectRoot) return { ok: false, reason: 'not-found' };
+  const bin = findLocalPrettierBin(projectRoot);
+  if (!bin) return { ok: false, reason: 'not-found' };
+  return new Promise((resolve) => {
+    const child = execFile(bin, ['--stdin-filepath', filePath], { cwd: projectRoot, timeout: 15000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // A parser-inference failure (unsupported file type) or a syntax error
+      // in the file both come through here as a non-zero exit — treat both
+      // as "can't format this one," not a crash-worthy error.
+      if (err) { resolve({ ok: false, reason: 'error', error: stderr || err.message }); return; }
+      resolve({ ok: true, formatted: stdout });
+    });
+    child.stdin.write(content);
+    child.stdin.end();
+  });
+});
+
 function findLocalEslintBin(root) {
   const bin = process.platform === 'win32' ? 'eslint.cmd' : 'eslint';
   const p = path.join(root, 'node_modules', '.bin', bin);
   return fs.existsSync(p) ? p : null;
 }
+
+const NPM_BIN = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+ipcMain.handle('npm:outdated', async (evt, projectRoot) => {
+  if (!projectRoot) return { ok: false, error: 'No project open.' };
+  if (!fs.existsSync(path.join(projectRoot, 'package.json'))) return { ok: false, reason: 'no-package-json' };
+  return new Promise((resolve) => {
+    execFile(NPM_BIN, ['outdated', '--json'], { cwd: projectRoot, timeout: 20000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // npm outdated exits with code 1 whenever it finds outdated packages —
+      // that's normal, not a failure. Only a genuinely empty result with a
+      // non-1 exit code (e.g. npm itself not found, network error) is a
+      // real error worth surfacing.
+      const trimmed = (stdout || '').trim();
+      if (!trimmed) {
+        if (err && err.code !== 1) resolve({ ok: false, error: stderr || err.message });
+        else resolve({ ok: true, packages: [] });
+        return;
+      }
+      try {
+        const data = JSON.parse(trimmed);
+        const packages = Object.entries(data).map(([name, info]) => ({
+          name,
+          current: info.current || '(not installed)',
+          wanted: info.wanted || '',
+          latest: info.latest || '',
+          type: info.type || 'dependencies',
+        }));
+        resolve({ ok: true, packages });
+      } catch {
+        resolve({ ok: false, error: 'Could not parse npm outdated output.' });
+      }
+    });
+  });
+});
 
 ipcMain.handle('eslint:lint', async (evt, projectRoot, filePath, content) => {
   if (!projectRoot) return { ok: false, reason: 'not-found' };
@@ -1429,7 +1539,12 @@ ipcMain.handle('git:pull', async (evt, projectRoot) => {
   const root = await getGitRoot(projectRoot);
   if (!root) return { ok: false, error: 'Not a git repository.' };
   const authArgs = await githubAuthArgsForRemote(root);
-  const res = await runGit([...authArgs, 'pull'], root, { authSensitive: true, timeoutMs: 30000 });
+  // --no-rebase: always merge on divergent branches rather than letting git
+  // fall back to asking for a pull.rebase preference it may not have set —
+  // newer git refuses to guess and fails outright without this. Merge is the
+  // safer default for a GUI client (no history rewriting to reason about
+  // without a terminal open), and matches most other git GUIs' defaults.
+  const res = await runGit([...authArgs, 'pull', '--no-rebase'], root, { authSensitive: true, timeoutMs: 30000 });
   return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Pull failed.') };
 });
 

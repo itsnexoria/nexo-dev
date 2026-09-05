@@ -9,6 +9,7 @@ const state = {
   contextTarget: null, // {path, isDirectory} for right-click actions
   showIgnored: false,
   selectedPaths: new Set(), // multi-select in the file tree
+  projectSettingsActive: false, // whether the open project has a .nexo/settings.json override
 };
 
 const uiState = {
@@ -17,6 +18,8 @@ const uiState = {
   minimap: true,
   wordWrap: false,
   bracketGuides: false,
+  vimMode: false,
+  formatOnSave: false,
   scriptsOrder: [],
   snippets: [],
   autoSave: false,
@@ -306,8 +309,58 @@ function initMonaco(cb) {
 
     registerSnippetProvider();
     registerBlameHoverProvider();
+    registerConflictCodeLensProvider();
+    if (uiState.vimMode) enableVimMode();
     cb();
   });
+}
+
+// ---------------- Vim keybindings (loaded on demand) ----------------
+// monaco-vim's UMD wrapper checks `define.amd` to decide whether to register
+// itself as an AMD module or set window.MonacoVim. Monaco's own AMD loader
+// stays resident on the page indefinitely after it loads, so a plain
+// <script> tag added at any later point would get silently routed into the
+// AMD branch instead — which won't resolve correctly against our local
+// Monaco build. Working around it the same way several other tools do:
+// temporarily undefine `define` for the duration of the script load so the
+// UMD wrapper falls into its plain-global branch instead, then restore it.
+let monacoVimLoaded = false;
+let vimModeDisposable = null;
+
+function loadMonacoVim(cb) {
+  if (monacoVimLoaded && window.MonacoVim) { cb(); return; }
+  const savedDefine = window.define;
+  window.define = undefined;
+  const script = document.createElement('script');
+  script.src = '../node_modules/monaco-vim/dist/monaco-vim.umd.js';
+  script.onload = () => {
+    window.define = savedDefine;
+    monacoVimLoaded = true;
+    cb();
+  };
+  script.onerror = () => {
+    window.define = savedDefine;
+    alert('Could not load Vim mode — the monaco-vim package may be missing from this install.');
+  };
+  document.head.appendChild(script);
+}
+
+function enableVimMode() {
+  if (!editor) return;
+  loadMonacoVim(() => {
+    if (vimModeDisposable) return; // already on
+    const statusBar = document.getElementById('vim-status-bar');
+    statusBar.classList.remove('hidden');
+    vimModeDisposable = window.MonacoVim.initVimMode(editor, statusBar);
+  });
+}
+
+function disableVimMode() {
+  if (vimModeDisposable) {
+    vimModeDisposable.dispose();
+    vimModeDisposable = null;
+  }
+  document.getElementById('vim-status-bar').classList.add('hidden');
 }
 
 // User-defined snippets (Settings → Snippets). Registered once per language
@@ -423,10 +476,89 @@ function escapeHtml(str) {
 }
 
 // ---------------- Project / File tree ----------------
+// ---------------- Per-project settings override (.nexo/settings.json) ----------------
+// A project can override a subset of the global settings for anyone who
+// opens it — useful for e.g. a project that needs word wrap on, or a
+// specific font size, without changing your global defaults. It's a plain
+// JSON file the user edits themselves (or via the convenience commands
+// below); Nexo Dev never writes to it except when explicitly asked to.
+const PROJECT_OVERRIDABLE_KEYS = ['fontSize', 'wordWrap', 'minimap', 'bracketGuides', 'theme', 'autoSave', 'autoSaveDelayMs', 'vimMode', 'formatOnSave'];
+
+function projectSettingsPath(folder) {
+  const sep = folder.includes('\\') ? '\\' : '/';
+  return `${folder}${sep}.nexo${sep}settings.json`;
+}
+
+async function loadProjectSettingsOverride(folder) {
+  const res = await window.nexo.readFile(projectSettingsPath(folder));
+  if (!res.ok) return null;
+  try {
+    const parsed = JSON.parse(res.content);
+    return (parsed && typeof parsed === 'object') ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function applyProjectSettings(folder) {
+  // Always start from a clean global baseline — otherwise leftover overrides
+  // from a previously-open project would bleed into this one.
+  try {
+    const globalPrefs = await window.nexo.getPrefs();
+    Object.assign(uiState, globalPrefs);
+  } catch { /* keep current uiState if this fails */ }
+
+  const overrides = await loadProjectSettingsOverride(folder);
+  state.projectSettingsActive = !!overrides;
+  if (overrides) {
+    for (const key of PROJECT_OVERRIDABLE_KEYS) {
+      if (overrides[key] !== undefined) uiState[key] = overrides[key];
+    }
+  }
+
+  applyTheme(uiState.theme, { skipSave: true });
+  applyEditorOptionToBoth({
+    fontSize: uiState.fontSize,
+    wordWrap: uiState.wordWrap ? 'on' : 'off',
+    minimap: { enabled: uiState.minimap, renderCharacters: false, maxColumn: 80 },
+    bracketPairColorization: { enabled: uiState.bracketGuides },
+    guides: { indentation: uiState.bracketGuides, bracketPairs: uiState.bracketGuides },
+  });
+  if (uiState.vimMode && !vimModeDisposable) enableVimMode();
+  else if (!uiState.vimMode && vimModeDisposable) disableVimMode();
+  renderSettingsPage();
+}
+
+async function handleOpenProjectSettings() {
+  if (!state.projectRoot) { alert('Open a project first.'); return; }
+  const settingsPath = projectSettingsPath(state.projectRoot);
+  const existing = await window.nexo.readFile(settingsPath);
+  if (!existing.ok) {
+    const template = JSON.stringify({ wordWrap: false, fontSize: uiState.fontSize }, null, 2) + '\n';
+    const writeRes = await window.nexo.writeFile(settingsPath, template);
+    if (!writeRes.ok) { alert(`Could not create .nexo/settings.json:\n${writeRes.error}`); return; }
+  }
+  openFile(settingsPath);
+}
+
+async function handleSaveCurrentAsProjectSettings() {
+  if (!state.projectRoot) { alert('Open a project first.'); return; }
+  const snapshot = {};
+  for (const key of PROJECT_OVERRIDABLE_KEYS) snapshot[key] = uiState[key];
+  const settingsPath = projectSettingsPath(state.projectRoot);
+  const res = await window.nexo.writeFile(settingsPath, JSON.stringify(snapshot, null, 2) + '\n');
+  if (!res.ok) { alert(`Could not save project settings:\n${res.error}`); return; }
+  state.projectSettingsActive = true;
+  renderTree();
+  renderSettingsPage();
+  flashToast('Saved current settings as this project\'s override (.nexo/settings.json)');
+}
+
 async function openProject(folder) {
   state.projectRoot = folder;
   state.expanded = new Set([folder]);
   paletteState.filesCache = null;
+  await applyProjectSettings(folder);
   document.getElementById('project-name').textContent = folder.split(/[\\/]/).pop();
   document.getElementById('sidebar-root-name').textContent = folder.split(/[\\/]/).pop().toUpperCase();
   document.getElementById('welcome').style.display = 'none';
@@ -827,6 +959,7 @@ async function openFile(filePath, opts = {}) {
   }
   if (!opts.skipActivate) activateTab(filePath);
   if (!opts.silent) renderTree();
+  if (!opts.silent) window.nexo.addRecentFile(filePath, state.projectRoot);
   return true;
 }
 
@@ -1066,6 +1199,24 @@ function maybeAutoSave(filePath) {
   autoSaveTimers.set(filePath, timer);
 }
 
+async function formatTabWithPrettier(tab) {
+  if (!state.projectRoot) return false;
+  const res = await window.nexo.formatWithPrettier(state.projectRoot, tab.path, tab.model.getValue());
+  if (!res.ok) return false; // no local prettier, or it couldn't parse this file — leave content untouched
+  if (res.formatted === tab.model.getValue()) return false; // already formatted, avoid a no-op undo entry
+  const fullRange = tab.model.getFullModelRange();
+  tab.model.pushEditOperations([], [{ range: fullRange, text: res.formatted }], () => null);
+  return true;
+}
+
+async function formatActiveDocument() {
+  if (!state.activeTab) return;
+  const tab = state.openTabs.find((t) => t.path === state.activeTab);
+  if (!tab) return;
+  const formatted = await formatTabWithPrettier(tab);
+  if (!formatted) flashToast('Nothing to format — no local Prettier install found, or this file type isn\'t supported.');
+}
+
 async function saveActiveTab() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
@@ -1074,6 +1225,7 @@ async function saveActiveTab() {
     const proceed = confirm('This file still has unresolved merge conflict markers (<<<<<<< / ======= / >>>>>>>).\n\nSave anyway?');
     if (!proceed) return;
   }
+  if (uiState.formatOnSave) await formatTabWithPrettier(tab);
   const res = await window.nexo.writeFile(tab.path, tab.model.getValue());
   if (!res.ok) { alert(`Could not save file:\n${res.error}`); return; }
   tab.modified = false;
@@ -1837,10 +1989,10 @@ async function continueCloneFlow(url) {
   showUpdateToast('Cloning repository…', []);
   try {
     const res = await window.nexo.cloneRepo(url, parent);
-    hideUpdateToast();
     if (!res.ok) { alert(`Clone failed:\n${res.error}`); return; }
     await openProject(res.path);
   } finally {
+    hideUpdateToast();
     openInProgress = false;
   }
 }
@@ -1879,11 +2031,14 @@ function handleCreateGithubRepo() {
 async function continueCreateGithubRepoFlow(name, description) {
   const isPrivate = confirm('Make this repository private?\n\nOK = private, Cancel = public');
   showUpdateToast('Creating repository…', []);
-  const res = await window.nexo.createGithubRepo({ name, description, isPrivate });
-  hideUpdateToast();
-  if (!res.ok) { alert(`Could not create repository:\n${res.error}`); return; }
-  const cloneNow = confirm(`Created ${res.repo.fullName} on GitHub.\n\nClone it locally now?`);
-  if (cloneNow) continueCloneFlow(res.repo.cloneUrl);
+  try {
+    const res = await window.nexo.createGithubRepo({ name, description, isPrivate });
+    if (!res.ok) { alert(`Could not create repository:\n${res.error}`); return; }
+    const cloneNow = confirm(`Created ${res.repo.fullName} on GitHub.\n\nClone it locally now?`);
+    if (cloneNow) continueCloneFlow(res.repo.cloneUrl);
+  } finally {
+    hideUpdateToast();
+  }
 }
 document.getElementById('btn-new-file').addEventListener('click', handleNewFile);
 document.getElementById('btn-add-file').addEventListener('click', () => state.projectRoot && promptNewFile(state.projectRoot));
@@ -1915,6 +2070,7 @@ document.addEventListener('keydown', (e) => {
   if (ctrl && e.shiftKey && e.key.toLowerCase() === 't') { e.preventDefault(); reopenClosedTab(); }
   if (ctrl && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openPalette('files'); }
   if (ctrl && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); openPalette('commands'); }
+  if (e.shiftKey && e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); formatActiveDocument(); }
   if (e.key === 'Escape' && document.body.classList.contains('zen-mode')) { toggleZenMode(false); }
   if (ctrl && e.key.toLowerCase() === 'b') {
     e.preventDefault();
@@ -2162,9 +2318,13 @@ document.getElementById('btn-replace-all').addEventListener('click', async () =>
   const btn = document.getElementById('btn-replace-all');
   btn.disabled = true;
   btn.textContent = 'Replacing…';
-  const res = await window.nexo.replaceAll(state.projectRoot, query, replacement, { caseSensitive, useRegex });
-  btn.disabled = false;
-  btn.textContent = 'Replace All';
+  let res;
+  try {
+    res = await window.nexo.replaceAll(state.projectRoot, query, replacement, { caseSensitive, useRegex });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Replace All';
+  }
 
   if (res.errors.length && res.filesChanged === 0 && res.totalReplacements === 0 && res.errors[0].path === '') {
     const errBox = document.getElementById('search-regex-error');
@@ -2295,12 +2455,15 @@ async function gitPushFlow() {
   btn.disabled = true;
   btn.textContent = '⬆ Pushing…';
   const stillWorkingTimer = setTimeout(() => { btn.textContent = '⬆ Still working…'; }, 5000);
-  const res = await window.nexo.gitPush(state.projectRoot);
-  clearTimeout(stillWorkingTimer);
-  btn.textContent = '⬆ Push';
-  btn.disabled = false;
-  if (!res.ok) { alert(`Push failed:\n${res.error}`); return; }
-  refreshRemoteStatus();
+  try {
+    const res = await window.nexo.gitPush(state.projectRoot);
+    if (!res.ok) { alert(`Push failed:\n${res.error}`); return; }
+    refreshRemoteStatus();
+  } finally {
+    clearTimeout(stillWorkingTimer);
+    btn.textContent = '⬆ Push';
+    btn.disabled = false;
+  }
 }
 
 async function gitPullFlow() {
@@ -2308,13 +2471,16 @@ async function gitPullFlow() {
   btn.disabled = true;
   btn.textContent = '⬇ Pulling…';
   const stillWorkingTimer = setTimeout(() => { btn.textContent = '⬇ Still working…'; }, 5000);
-  const res = await window.nexo.gitPull(state.projectRoot);
-  clearTimeout(stillWorkingTimer);
-  btn.textContent = '⬇ Pull';
-  btn.disabled = false;
-  if (!res.ok) { alert(`Pull failed:\n${res.error}`); return; }
-  await renderTree();
-  refreshGitStatus();
+  try {
+    const res = await window.nexo.gitPull(state.projectRoot);
+    if (!res.ok) { alert(`Pull failed:\n${res.error}`); return; }
+    await renderTree();
+    refreshGitStatus();
+  } finally {
+    clearTimeout(stillWorkingTimer);
+    btn.textContent = '⬇ Pull';
+    btn.disabled = false;
+  }
 }
 
 document.getElementById('git-push-btn').addEventListener('click', gitPushFlow);
@@ -2758,10 +2924,8 @@ function getConflictNearCursor() {
   return conflicts.find((c) => c.startLine >= line) || conflicts[0];
 }
 
-function resolveConflict(mode) {
-  const c = getConflictNearCursor();
-  if (!c || !editor) return;
-  const model = editor.getModel();
+function resolveConflictAt(model, c, mode) {
+  if (!model || !c) return;
   const lines = model.getLinesContent();
   const oursLines = lines.slice(c.startLine, c.sepLine - 1);
   const theirsLines = lines.slice(c.sepLine, c.endLine - 1);
@@ -2776,9 +2940,16 @@ function resolveConflict(mode) {
     ? replacement.join(eol)
     : replacement.join(eol) + (replacement.length ? eol : '');
 
-  editor.executeEdits('resolve-conflict', [{ range, text }]);
+  model.applyEdits([{ range, text }]);
+  if (editor && editor.getModel() === model) updateConflictBanner();
+}
+
+function resolveConflict(mode) {
+  if (!editor) return;
+  const c = getConflictNearCursor();
+  if (!c) return;
+  resolveConflictAt(editor.getModel(), c, mode);
   editor.focus();
-  updateConflictBanner();
 }
 
 function jumpToNextConflict() {
@@ -2787,6 +2958,34 @@ function jumpToNextConflict() {
   editor.revealLineInCenter(c.startLine);
   editor.setPosition({ lineNumber: c.startLine, column: 1 });
   editor.focus();
+}
+
+// Inline "Accept Current / Accept Incoming / Accept Both" links directly
+// above each conflict block, VS-Code-style — lets you resolve a specific
+// conflict in place without moving the cursor to it first and using the
+// banner buttons, which only ever act on whichever conflict is nearest the
+// cursor. CodeLens auto-refreshes on content change, so lenses disappear as
+// each conflict gets resolved with no manual re-scan needed.
+function registerConflictCodeLensProvider() {
+  monaco.editor.registerCommand('nexo.resolveConflictAt', (accessor, model, conflict, mode) => {
+    resolveConflictAt(model, conflict, mode);
+  });
+  const languageIds = [...new Set(Object.values(LANG_MAP))];
+  const provider = {
+    provideCodeLenses(model) {
+      const conflicts = scanConflicts(model);
+      const lenses = [];
+      for (const c of conflicts) {
+        const range = new monaco.Range(c.startLine, 1, c.startLine, 1);
+        lenses.push({ range, command: { id: 'nexo.resolveConflictAt', title: '✓ Accept Current Change', arguments: [model, c, 'current'] } });
+        lenses.push({ range, command: { id: 'nexo.resolveConflictAt', title: '✓ Accept Incoming Change', arguments: [model, c, 'incoming'] } });
+        lenses.push({ range, command: { id: 'nexo.resolveConflictAt', title: '✓ Accept Both Changes', arguments: [model, c, 'both'] } });
+      }
+      return { lenses, dispose: () => {} };
+    },
+    resolveCodeLens(model, codeLens) { return codeLens; },
+  };
+  languageIds.forEach((lang) => monaco.languages.registerCodeLensProvider(lang, provider));
 }
 
 document.getElementById('conflict-current').addEventListener('click', () => resolveConflict('current'));
@@ -2819,6 +3018,7 @@ function switchRailView(view) {
   if (view === 'scripts') loadScripts();
   if (view === 'outline') renderOutlinePanel();
   if (view === 'github') loadGithubPanel();
+  if (view === 'todos') loadTodos();
 }
 
 document.querySelectorAll('.rail-btn').forEach((btn) => {
@@ -2917,6 +3117,36 @@ function renderSettingsPage() {
           <div class="settings-row-desc">Color-matches bracket pairs and shows indent guide lines. Off by default — it's one of the pricier Monaco features on large files.</div>
         </div>
         <div class="settings-control"><div class="settings-toggle ${uiState.bracketGuides ? 'on' : ''}" id="set-bracket-guides"></div></div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Vim keybindings</div>
+          <div class="settings-row-desc">Modal editing (Normal/Insert/Visual modes) in the main editor. Loaded on demand the first time you turn it on. Applies to the main editor only, not the split view.</div>
+        </div>
+        <div class="settings-control"><div class="settings-toggle ${uiState.vimMode ? 'on' : ''}" id="set-vim-mode"></div></div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Format on save (Prettier)</div>
+          <div class="settings-row-desc">Runs the project's own local Prettier install before every save. Silently does nothing on projects without Prettier installed, or files it can't parse.</div>
+        </div>
+        <div class="settings-control"><div class="settings-toggle ${uiState.formatOnSave ? 'on' : ''}" id="set-format-on-save"></div></div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Project settings override</div>
+          <div class="settings-row-desc">
+            ${state.projectRoot
+              ? (state.projectSettingsActive
+                ? 'This project has a <code>.nexo/settings.json</code> overriding some settings above, just for this project.'
+                : 'This project has no override yet — the settings above are your global defaults.')
+              : 'Open a project to set up a per-project override.'}
+          </div>
+        </div>
+        <div class="settings-control">
+          <button class="tbtn" id="btn-open-project-settings" ${state.projectRoot ? '' : 'disabled'}>Edit File</button>
+          <button class="tbtn" id="btn-save-project-settings" ${state.projectRoot ? '' : 'disabled'}>Save Current</button>
+        </div>
       </div>
     </div>
 
@@ -3100,6 +3330,27 @@ function renderSettingsPage() {
     window.nexo.setPrefs({ bracketGuides: uiState.bracketGuides });
   });
 
+  const vimModeToggle = document.getElementById('set-vim-mode');
+  vimModeToggle.addEventListener('click', () => {
+    uiState.vimMode = !uiState.vimMode;
+    vimModeToggle.classList.toggle('on', uiState.vimMode);
+    if (uiState.vimMode) enableVimMode();
+    else disableVimMode();
+    window.nexo.setPrefs({ vimMode: uiState.vimMode });
+  });
+
+  const formatOnSaveToggle = document.getElementById('set-format-on-save');
+  formatOnSaveToggle.addEventListener('click', () => {
+    uiState.formatOnSave = !uiState.formatOnSave;
+    formatOnSaveToggle.classList.toggle('on', uiState.formatOnSave);
+    window.nexo.setPrefs({ formatOnSave: uiState.formatOnSave });
+  });
+
+  if (state.projectRoot) {
+    document.getElementById('btn-open-project-settings').addEventListener('click', handleOpenProjectSettings);
+    document.getElementById('btn-save-project-settings').addEventListener('click', handleSaveCurrentAsProjectSettings);
+  }
+
   const autoSaveToggle = document.getElementById('set-autosave');
   autoSaveToggle.addEventListener('click', () => {
     uiState.autoSave = !uiState.autoSave;
@@ -3163,9 +3414,13 @@ async function renderGithubSettingsControl() {
     connectBtn.disabled = true;
     connectBtn.textContent = 'Connecting…';
     errBox.classList.add('hidden');
-    const res = await window.nexo.setGithubToken(token);
-    connectBtn.disabled = false;
-    connectBtn.textContent = 'Connect';
+    let res;
+    try {
+      res = await window.nexo.setGithubToken(token);
+    } finally {
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect';
+    }
     if (!res.ok) {
       errBox.textContent = res.error;
       errBox.classList.remove('hidden');
@@ -3530,27 +3785,90 @@ function renderScriptsPanel() {
   });
 }
 
-async function runScript(name) {
-  if (!state.projectRoot || !scriptsState.scripts || !(name in scriptsState.scripts)) return;
+async function runCommandInTerminal(cmd, runningLabel) {
+  if (!state.projectRoot) return;
   toggleTerminal(true);
   let t = getActiveTerminal();
   if (t && t.activeRunId) { t = createTerminalSession(); switchTerminalTab(t.id); } // busy tab — run in a fresh one instead of blocking
   if (!t) return;
   resetAnsiState(t);
-  const cmd = `npm run ${name}`;
   termAppend(t, `\n$ ${cmd}\n`, 'term-cmd');
   t.history.push(cmd);
   t.historyIdx = t.history.length;
   const res = await window.nexo.runCommand(state.projectRoot, cmd);
   if (!res.id) { termAppend(t, `[error] ${res.error || 'Could not start command.'}\n`, 'term-err'); return; }
   t.activeRunId = res.id;
-  t.runningScript = name;
+  if (runningLabel) t.runningScript = runningLabel;
   if (t.id === activeTerminalId) document.getElementById('term-run-btn').textContent = 'Stop';
   renderTerminalTabs();
   renderScriptsPanel();
 }
 
-document.getElementById('btn-scripts-refresh').addEventListener('click', loadScripts);
+async function runScript(name) {
+  if (!state.projectRoot || !scriptsState.scripts || !(name in scriptsState.scripts)) return;
+  await runCommandInTerminal(`npm run ${name}`, name);
+}
+
+let scriptsSubtab = 'scripts';
+
+function switchScriptsSubtab(tab) {
+  scriptsSubtab = tab;
+  document.getElementById('scripts-tab-scripts').classList.toggle('active', tab === 'scripts');
+  document.getElementById('scripts-tab-outdated').classList.toggle('active', tab === 'outdated');
+  document.getElementById('scripts-list').classList.toggle('hidden', tab !== 'scripts');
+  document.getElementById('outdated-list').classList.toggle('hidden', tab !== 'outdated');
+  if (tab === 'outdated' && outdatedState.packages === null) loadOutdated();
+}
+
+document.getElementById('scripts-tab-scripts').addEventListener('click', () => switchScriptsSubtab('scripts'));
+document.getElementById('scripts-tab-outdated').addEventListener('click', () => switchScriptsSubtab('outdated'));
+
+document.getElementById('btn-scripts-refresh').addEventListener('click', () => {
+  if (scriptsSubtab === 'outdated') loadOutdated();
+  else loadScripts();
+});
+
+// ---------------- Outdated dependencies ----------------
+let outdatedState = { packages: null, error: null, loading: false };
+
+async function loadOutdated() {
+  if (!state.projectRoot) { outdatedState = { packages: null, error: 'Open a folder first.', loading: false }; renderOutdatedList(); return; }
+  outdatedState = { packages: null, error: null, loading: true };
+  renderOutdatedList();
+  const res = await window.nexo.checkOutdated(state.projectRoot);
+  if (res.reason === 'no-package-json') {
+    outdatedState = { packages: null, error: 'No package.json found in this project.', loading: false };
+  } else if (!res.ok) {
+    outdatedState = { packages: null, error: res.error || 'Could not check for outdated packages.', loading: false };
+  } else {
+    outdatedState = { packages: res.packages, error: null, loading: false };
+  }
+  renderOutdatedList();
+}
+
+function renderOutdatedList() {
+  const box = document.getElementById('outdated-list');
+  if (!box) return;
+  if (outdatedState.loading) { box.innerHTML = '<div id="scripts-empty">Checking for outdated packages…</div>'; return; }
+  if (outdatedState.error) { box.innerHTML = `<div id="scripts-empty">${escapeHtml(outdatedState.error)}</div>`; return; }
+  const packages = outdatedState.packages || [];
+  if (!packages.length) { box.innerHTML = '<div id="scripts-empty">Everything is up to date.</div>'; return; }
+  box.innerHTML = `
+    <div class="outdated-actions"><button class="tbtn" id="btn-update-all">Update All (npm update)</button></div>
+    ${packages.map((p) => `
+      <div class="outdated-row">
+        <div class="outdated-row-main">
+          <div class="outdated-row-name">${escapeHtml(p.name)}</div>
+          <div class="outdated-row-versions">${escapeHtml(p.current)} → <span class="outdated-wanted">${escapeHtml(p.wanted)}</span> (latest: <span class="outdated-latest">${escapeHtml(p.latest)}</span>)</div>
+        </div>
+        <button class="script-run-btn" data-pkg="${escapeHtml(p.name)}">Update</button>
+      </div>`).join('')}
+  `;
+  document.getElementById('btn-update-all').addEventListener('click', () => runCommandInTerminal('npm update'));
+  box.querySelectorAll('.outdated-row .script-run-btn').forEach((btn) => {
+    btn.addEventListener('click', () => runCommandInTerminal(`npm install ${btn.dataset.pkg}@latest`));
+  });
+}
 
 // ---------------- GitHub PRs / Issues panel ----------------
 let githubPanelState = { subtab: 'pulls', pulls: null, issues: null, releases: null, pullsError: null, issuesError: null, releasesError: null, error: null, loading: false };
@@ -3680,12 +3998,15 @@ async function continueCreateReleaseFlow(tagName, name, body) {
   let prerelease = false;
   if (!draft) prerelease = confirm('Mark this as a pre-release?\n\nOK = pre-release, Cancel = full release');
   showUpdateToast('Creating release…', []);
-  const res = await window.nexo.createGithubRelease(state.projectRoot, {
-    tagName, name, body, draft, prerelease, targetCommitish: gitState.branch || undefined,
-  });
-  hideUpdateToast();
-  if (!res.ok) { alert(`Could not create release:\n${res.error}`); return; }
-  if (document.getElementById('panel-github').classList.contains('active')) loadGithubPanel();
+  try {
+    const res = await window.nexo.createGithubRelease(state.projectRoot, {
+      tagName, name, body, draft, prerelease, targetCommitish: gitState.branch || undefined,
+    });
+    if (!res.ok) { alert(`Could not create release:\n${res.error}`); return; }
+    if (document.getElementById('panel-github').classList.contains('active')) loadGithubPanel();
+  } finally {
+    hideUpdateToast();
+  }
 }
 
 // ---------------- Cloudflare Pages deploy scaffolding ----------------
@@ -3753,25 +4074,27 @@ jobs:
 
 async function continueCloudflareDeploySetup(projectName, buildDir, apiToken, accountId) {
   showUpdateToast('Setting up Cloudflare Pages deploy…', []);
-  const secretsToSet = [['CLOUDFLARE_API_TOKEN', apiToken], ['CLOUDFLARE_ACCOUNT_ID', accountId]];
-  for (const [name, value] of secretsToSet) {
-    const res = await window.nexo.setGithubSecret(state.projectRoot, name, value);
-    if (!res.ok) {
-      hideUpdateToast();
-      alert(`Could not set the ${name} secret on GitHub:\n${res.error}\n\nMake sure your GitHub token has permission to manage Actions secrets for this repo (classic tokens need the full "repo" scope).`);
-      return;
+  try {
+    const secretsToSet = [['CLOUDFLARE_API_TOKEN', apiToken], ['CLOUDFLARE_ACCOUNT_ID', accountId]];
+    for (const [name, value] of secretsToSet) {
+      const res = await window.nexo.setGithubSecret(state.projectRoot, name, value);
+      if (!res.ok) {
+        alert(`Could not set the ${name} secret on GitHub:\n${res.error}\n\nMake sure your GitHub token has permission to manage Actions secrets for this repo (classic tokens need the full "repo" scope).`);
+        return;
+      }
     }
+    const branch = gitState.branch || 'main';
+    const yaml = buildCloudflarePagesWorkflowYaml(projectName, buildDir, branch);
+    const sep = state.projectRoot.includes('\\') ? '\\' : '/';
+    const workflowPath = `${state.projectRoot}${sep}.github${sep}workflows${sep}deploy-cloudflare-pages.yml`;
+    const writeRes = await window.nexo.writeFile(workflowPath, yaml);
+    if (!writeRes.ok) { alert(`Secrets were set on GitHub, but the workflow file couldn't be written:\n${writeRes.error}`); return; }
+    renderTree();
+    const openNow = confirm(`Done! Created .github/workflows/deploy-cloudflare-pages.yml and set your Cloudflare secrets on GitHub.\n\nCommit and push this file to enable auto-deploys on every push to "${branch}".\n\nOpen the workflow file now?`);
+    if (openNow) openFile(workflowPath);
+  } finally {
+    hideUpdateToast();
   }
-  const branch = gitState.branch || 'main';
-  const yaml = buildCloudflarePagesWorkflowYaml(projectName, buildDir, branch);
-  const sep = state.projectRoot.includes('\\') ? '\\' : '/';
-  const workflowPath = `${state.projectRoot}${sep}.github${sep}workflows${sep}deploy-cloudflare-pages.yml`;
-  const writeRes = await window.nexo.writeFile(workflowPath, yaml);
-  hideUpdateToast();
-  if (!writeRes.ok) { alert(`Secrets were set on GitHub, but the workflow file couldn't be written:\n${writeRes.error}`); return; }
-  renderTree();
-  const openNow = confirm(`Done! Created .github/workflows/deploy-cloudflare-pages.yml and set your Cloudflare secrets on GitHub.\n\nCommit and push this file to enable auto-deploys on every push to "${branch}".\n\nOpen the workflow file now?`);
-  if (openNow) openFile(workflowPath);
 }
 
 document.getElementById('github-tab-pulls').addEventListener('click', () => { githubPanelState.subtab = 'pulls'; renderGithubPanel(); });
@@ -3780,6 +4103,57 @@ document.getElementById('github-tab-releases').addEventListener('click', () => {
 document.getElementById('btn-github-refresh').addEventListener('click', loadGithubPanel);
 document.getElementById('btn-github-new-repo').addEventListener('click', handleCreateGithubRepo);
 document.getElementById('btn-cloudflare-deploy').addEventListener('click', handleSetupCloudflareDeploy);
+
+// ---------------- TODO / FIXME comments panel ----------------
+let todosState = { todos: null, error: null, loading: false };
+
+async function loadTodos() {
+  const box = document.getElementById('todos-list');
+  if (!state.projectRoot) { todosState = { todos: null, error: 'Open a folder first.', loading: false }; renderTodosPanel(); return; }
+  todosState = { todos: null, error: null, loading: true };
+  renderTodosPanel();
+  const res = await window.nexo.scanTodos(state.projectRoot);
+  if (!res.ok) { todosState = { todos: null, error: res.error || 'Could not scan for TODOs.', loading: false }; renderTodosPanel(); return; }
+  todosState = { todos: res.todos, error: null, loading: false, truncated: res.truncated };
+  renderTodosPanel();
+}
+
+const TODO_TAG_CLASS = { TODO: 'todo-tag-todo', FIXME: 'todo-tag-fixme', HACK: 'todo-tag-hack' };
+
+function renderTodosPanel() {
+  const box = document.getElementById('todos-list');
+  if (!box) return;
+  if (todosState.loading) { box.innerHTML = '<div id="scripts-empty">Scanning project…</div>'; return; }
+  if (todosState.error) { box.innerHTML = `<div id="scripts-empty">${escapeHtml(todosState.error)}</div>`; return; }
+  const todos = todosState.todos || [];
+  if (!todos.length) { box.innerHTML = '<div id="scripts-empty">No TODO, FIXME, or HACK comments found.</div>'; return; }
+  const rootSep = state.projectRoot.includes('\\') ? '\\' : '/';
+  box.innerHTML = (todosState.truncated ? '<div id="scripts-empty">Showing a partial scan — this is a large project.</div>' : '') + todos.map((t) => {
+    const rel = t.path.startsWith(state.projectRoot) ? t.path.slice(state.projectRoot.length + 1) : t.path;
+    return `
+      <div class="todo-row" data-path="${escapeHtml(t.path)}" data-line="${t.line}">
+        <span class="todo-tag ${TODO_TAG_CLASS[t.tag] || 'todo-tag-todo'}">${escapeHtml(t.tag)}</span>
+        <div class="todo-row-main">
+          <div class="todo-row-text">${escapeHtml(t.text || '(no message)')}</div>
+          <div class="todo-row-loc">${escapeHtml(rel)}:${t.line}</div>
+        </div>
+      </div>`;
+  }).join('');
+  box.querySelectorAll('.todo-row').forEach((row) => {
+    row.addEventListener('click', async () => {
+      const path = row.dataset.path;
+      const line = parseInt(row.dataset.line, 10);
+      await openFile(path);
+      if (editor && editor.getModel() && state.activeTab === path) {
+        editor.revealLineInCenter(line);
+        editor.setPosition({ lineNumber: line, column: 1 });
+        editor.focus();
+      }
+    });
+  });
+}
+
+document.getElementById('btn-todos-refresh').addEventListener('click', loadTodos);
 
 // ---------------- Command Palette / Quick Open ----------------
 const paletteState = { mode: 'files', items: [], active: 0, filesCache: null };
@@ -3793,12 +4167,16 @@ const PALETTE_COMMANDS = [
   { label: 'Source Control', run: () => switchRailView('git') },
   { label: 'npm Scripts', run: () => switchRailView('scripts') },
   { label: 'Outline', run: () => switchRailView('outline') },
+  { label: 'Format Document', run: formatActiveDocument },
+  { label: 'Show TODOs / FIXMEs', run: () => switchRailView('todos') },
   { label: 'Settings', run: () => switchRailView('settings') },
   { label: 'GitHub', run: () => switchRailView('github') },
   { label: 'Browse GitHub Repos…', run: openGithubRepoPicker },
   { label: 'Create GitHub Repo…', run: handleCreateGithubRepo },
   { label: 'Create GitHub Release…', run: () => { switchRailView('github'); githubPanelState.subtab = 'releases'; renderGithubPanel(); openCreateReleaseForm(); } },
   { label: 'Set Up Cloudflare Pages Deploy…', run: handleSetupCloudflareDeploy },
+  { label: 'Open Project Settings (.nexo/settings.json)', run: handleOpenProjectSettings },
+  { label: "Save Current Settings as Project Override", run: handleSaveCurrentAsProjectSettings },
   { label: 'Toggle Terminal', run: () => toggleTerminal() },
   { label: 'Toggle Split Editor', run: () => toggleSplit() },
   { label: 'Toggle Zen Mode', run: () => toggleZenMode() },
@@ -3818,6 +4196,7 @@ async function openPalette(mode) {
       const res = await window.nexo.listFiles(state.projectRoot);
       paletteState.filesCache = res.files || [];
     }
+    paletteState.recentFiles = await window.nexo.getRecentFiles();
   }
   if (mode === 'github-repos') {
     const status = await window.nexo.hasGithubToken();
@@ -3844,6 +4223,15 @@ async function openPalette(mode) {
 
 function closePalette() {
   document.getElementById('palette-overlay').classList.add('hidden');
+}
+
+async function openRecentFile(entry) {
+  if (entry.projectRoot && entry.projectRoot !== state.projectRoot) {
+    const exists = await window.nexo.exists(entry.projectRoot);
+    if (!exists) { alert(`That project folder no longer exists:\n${entry.projectRoot}`); return; }
+    await openProject(entry.projectRoot);
+  }
+  openFile(entry.path);
 }
 
 function paletteFuzzyMatch(query, text) {
@@ -3879,11 +4267,22 @@ function renderPaletteResults() {
       .filter((c) => paletteFuzzyMatch(query, c.label))
       .map((c) => ({ label: c.label, icon: '⚡', run: c.run }));
   } else if (state.projectRoot) {
-    const files = paletteState.filesCache || [];
-    items = files
-      .filter((f) => paletteFuzzyMatch(query, f))
-      .slice(0, 200)
-      .map((f) => ({ label: f.split(/[\\/]/).pop(), meta: f, icon: fileIcon(f, false), run: () => openFile(f) }));
+    if (!query) {
+      const recents = paletteState.recentFiles || [];
+      items = recents.slice(0, 30).map((f) => {
+        const inCurrentProject = f.projectRoot === state.projectRoot;
+        const meta = inCurrentProject
+          ? (f.path.startsWith(state.projectRoot) ? f.path.slice(state.projectRoot.length + 1) : f.path)
+          : `in ${f.projectRoot ? f.projectRoot.split(/[\\/]/).pop() : '?'}`;
+        return { label: f.path.split(/[\\/]/).pop(), meta, icon: fileIcon(f.path, false), run: () => openRecentFile(f) };
+      });
+    } else {
+      const files = paletteState.filesCache || [];
+      items = files
+        .filter((f) => paletteFuzzyMatch(query, f))
+        .slice(0, 200)
+        .map((f) => ({ label: f.split(/[\\/]/).pop(), meta: f, icon: fileIcon(f, false), run: () => openFile(f) }));
+    }
   }
 
   paletteState.items = items;

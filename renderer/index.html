@@ -47,6 +47,9 @@
       <button class="rail-btn" id="rail-github" data-view="github" title="GitHub PRs &amp; Issues">
         <span class="rail-icon">🐙</span><span class="rail-label">GitHub</span>
       </button>
+      <button class="rail-btn" id="rail-todos" data-view="todos" title="TODO / FIXME comments">
+        <span class="rail-icon">📝</span><span class="rail-label">TODOs</span>
+      </button>
       <button class="rail-btn rail-btn-bottom" id="rail-settings" data-view="settings" title="Settings">
         <span class="rail-icon">⚙️</span><span class="rail-label">Settings</span>
       </button>
@@ -119,7 +122,12 @@
             <span>NPM SCRIPTS</span>
             <div id="scripts-actions"><button class="icon-btn" id="btn-scripts-refresh" title="Refresh">↻</button></div>
           </div>
+          <div id="scripts-subtabs">
+            <button class="git-subtab active" id="scripts-tab-scripts" data-tab="scripts">Scripts</button>
+            <button class="git-subtab" id="scripts-tab-outdated" data-tab="outdated">Outdated</button>
+          </div>
           <div id="scripts-list"></div>
+          <div id="outdated-list" class="hidden"></div>
         </div>
 
         <!-- Outline panel -->
@@ -144,6 +152,15 @@
             <button class="git-subtab" id="github-tab-releases" data-tab="releases">Releases</button>
           </div>
           <div id="github-body"></div>
+        </div>
+
+        <!-- TODO / FIXME comments panel -->
+        <div id="panel-todos" class="sidebar-panel">
+          <div class="panel-header">
+            <span>TODOs</span>
+            <div id="todos-actions"><button class="icon-btn" id="btn-todos-refresh" title="Refresh">↻</button></div>
+          </div>
+          <div id="todos-list"></div>
         </div>
       </div>
 
@@ -234,6 +251,7 @@
         <div id="statusbar">
           <span id="status-path">No file open</span>
           <span id="status-right">
+            <span id="vim-status-bar" class="hidden"></span>
             <span id="status-lang"></span>
             <span id="status-pos"></span>
           </span>
