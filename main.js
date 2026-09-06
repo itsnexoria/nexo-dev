@@ -1082,6 +1082,14 @@ async function githubAuthArgsForRemote(root) {
   if (!token) return [];
   const remoteRes = await runGit(['remote', 'get-url', 'origin'], root);
   if (!remoteRes.ok || !/^https:\/\/(www\.)?github\.com\//i.test(remoteRes.stdout.trim())) return [];
+  // git's extraHeader config is multi-valued — if this repo already has a
+  // leftover http.extraheader entry from something else (an old manual PAT
+  // setup, GitHub Desktop, gh CLI, whatever), our own -c-scoped header below
+  // gets sent ALONGSIDE it rather than replacing it, so the request ends up
+  // with two Authorization headers and GitHub can reject or misbehave on
+  // that. Clearing any existing entry first (silently — it's fine if there
+  // isn't one) keeps this repo's git config from fighting with our own auth.
+  await runGit(['config', '--unset-all', 'http.https://github.com/.extraheader'], root);
   return githubAuthHeaderArgs(token);
 }
 

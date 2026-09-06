@@ -1,7 +1,7 @@
 {
   "name": "nexo-dev",
   "productName": "Nexo Dev",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "homepage": "https://nexorealm.org",
   "description": "A lightweight code editor and project manager.",
   "main": "main.js",
