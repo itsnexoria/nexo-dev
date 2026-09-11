@@ -69,6 +69,9 @@ contextBridge.exposeInMainWorld('nexo', {
   loadSession: (projectRoot) => ipcRenderer.invoke('session:load', projectRoot),
   setPrefs: (partial) => ipcRenderer.invoke('prefs:set', partial),
 
+  // Discord Rich Presence
+  setDiscordActivity: (details, state) => ipcRenderer.invoke('discord:set-activity', details, state),
+
   // command runner (safe alternative to a full terminal)
   runCommand: (cwd, command) => ipcRenderer.invoke('term:run', cwd, command),
   killCommand: (id) => ipcRenderer.invoke('term:kill', id),

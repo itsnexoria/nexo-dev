@@ -27,6 +27,8 @@ const uiState = {
   customShell: '',
   customTheme: { bg: '#0c0c10', text: '#ececf0', accent: '#ff3b30' },
   customThemes: [],
+  discordRpcEnabled: false,
+  discordClientId: '',
 };
 const splitState = { visible: false, tabPath: null, mdMode: null };
 let splitEditor = null;
@@ -575,6 +577,7 @@ async function openProject(folder) {
   refreshGitStatus();
   const termCwd = document.getElementById('terminal-cwd');
   if (termCwd) termCwd.textContent = `— ${state.projectRoot}`;
+  updateDiscordPresence();
 
   // Crash recovery: if nothing's open yet (fresh launch, or first time this
   // project is opened this session), silently reopen whatever was open last
@@ -963,6 +966,28 @@ async function openFile(filePath, opts = {}) {
   return true;
 }
 
+// ---------------- Discord Rich Presence ----------------
+// Debounced so rapid tab switches or fast typing don't spam the IPC call —
+// only the settled state after a short pause gets sent to Discord.
+let discordPresenceTimer = null;
+function updateDiscordPresence() {
+  if (!uiState.discordRpcEnabled) return;
+  if (discordPresenceTimer) clearTimeout(discordPresenceTimer);
+  discordPresenceTimer = setTimeout(() => {
+    let details = 'Idle';
+    let presenceState = 'No project open';
+    if (state.projectRoot) {
+      const projectName = state.projectRoot.split(/[\\/]/).pop();
+      presenceState = `In ${projectName}`;
+      const tab = state.activeTab && state.openTabs.find((t) => t.path === state.activeTab);
+      details = tab ? `Editing ${tab.name}` : 'Browsing files';
+    }
+    if (window.nexo && window.nexo.setDiscordActivity) {
+      window.nexo.setDiscordActivity(details, presenceState);
+    }
+  }, 600);
+}
+
 function activateTab(filePath) {
   state.activeTab = filePath;
   const tab = state.openTabs.find((t) => t.path === filePath);
@@ -999,6 +1024,7 @@ function activateTab(filePath) {
   refreshOutlineIfVisible();
   lintFile(filePath);
   refreshBlameForTab(filePath);
+  updateDiscordPresence();
 }
 
 let draggedTabPath = null;
@@ -1113,6 +1139,7 @@ function closeTab(filePath) {
       document.getElementById('editor-container').classList.remove('push-down');
       renderTabs();
       renderBreadcrumb();
+      updateDiscordPresence();
     }
   } else {
     renderTabs();
@@ -1463,7 +1490,7 @@ function promptRename(targetPath) {
 
 async function confirmDelete(targetPath, isDirectory) {
   const name = targetPath.split(/[\\/]/).pop();
-  const ok = confirm(`Delete "${name}"? This cannot be undone.`);
+  const ok = confirm(`Delete ${isDirectory ? 'folder' : 'file'} "${name}"? This cannot be undone.`);
   if (!ok) return;
   const res = await window.nexo.deleteItem(targetPath);
   if (!res.ok) { alert(`Could not delete:\n${res.error}`); return; }
@@ -3210,6 +3237,24 @@ function renderSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h2>Discord Rich Presence</h2>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Show activity in Discord</div>
+          <div class="settings-row-desc">Displays what you're working on (current file &amp; project) on your Discord profile while Nexo Dev and Discord are both open. Requires your own free Discord Application Client ID below.</div>
+        </div>
+        <div class="settings-control"><div class="settings-toggle ${uiState.discordRpcEnabled ? 'on' : ''}" id="set-discord-enabled"></div></div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Client ID</div>
+          <div class="settings-row-desc">From a Discord application you create at <a href="#" id="discord-dev-portal-link">discord.com/developers/applications</a> (free, takes under a minute — name it "Nexo Dev" or anything you like). Optionally upload an image named <code>nexo_logo</code> as a Rich Presence asset to have it show up as the large icon.</div>
+        </div>
+        <div class="settings-control"><input type="text" class="settings-text" id="set-discord-client-id" placeholder="e.g. 1234567890123456789" value="${escapeHtml(uiState.discordClientId || '')}" /></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h2>GitHub</h2>
       <div class="settings-row">
         <div>
@@ -3346,6 +3391,22 @@ function renderSettingsPage() {
     window.nexo.setPrefs({ formatOnSave: uiState.formatOnSave });
   });
 
+  const discordEnabledToggle = document.getElementById('set-discord-enabled');
+  discordEnabledToggle.addEventListener('click', () => {
+    uiState.discordRpcEnabled = !uiState.discordRpcEnabled;
+    discordEnabledToggle.classList.toggle('on', uiState.discordRpcEnabled);
+    window.nexo.setPrefs({ discordRpcEnabled: uiState.discordRpcEnabled });
+    if (uiState.discordRpcEnabled) updateDiscordPresence();
+  });
+  document.getElementById('set-discord-client-id').addEventListener('change', (e) => {
+    uiState.discordClientId = e.target.value.trim();
+    window.nexo.setPrefs({ discordClientId: uiState.discordClientId });
+  });
+  document.getElementById('discord-dev-portal-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.nexo.openExternal('https://discord.com/developers/applications');
+  });
+
   if (state.projectRoot) {
     document.getElementById('btn-open-project-settings').addEventListener('click', handleOpenProjectSettings);
     document.getElementById('btn-save-project-settings').addEventListener('click', handleSaveCurrentAsProjectSettings);
@@ -3390,7 +3451,7 @@ async function renderGithubSettingsControl() {
       box.innerHTML = `
         <div class="gh-connected">
           <span class="gh-connected-user">✓ Connected as <strong>${escapeHtml(res.user.login)}</strong></span>
-          <button class="tbtn" id="gh-disconnect-btn">Disconnect</button>
+          <button class="tbtn danger-tbtn" id="gh-disconnect-btn">Disconnect</button>
         </div>`;
       document.getElementById('gh-disconnect-btn').addEventListener('click', async () => {
         await window.nexo.clearGithubToken();
@@ -4108,7 +4169,6 @@ document.getElementById('btn-cloudflare-deploy').addEventListener('click', handl
 let todosState = { todos: null, error: null, loading: false };
 
 async function loadTodos() {
-  const box = document.getElementById('todos-list');
   if (!state.projectRoot) { todosState = { todos: null, error: 'Open a folder first.', loading: false }; renderTodosPanel(); return; }
   todosState = { todos: null, error: null, loading: true };
   renderTodosPanel();
@@ -4127,7 +4187,6 @@ function renderTodosPanel() {
   if (todosState.error) { box.innerHTML = `<div id="scripts-empty">${escapeHtml(todosState.error)}</div>`; return; }
   const todos = todosState.todos || [];
   if (!todos.length) { box.innerHTML = '<div id="scripts-empty">No TODO, FIXME, or HACK comments found.</div>'; return; }
-  const rootSep = state.projectRoot.includes('\\') ? '\\' : '/';
   box.innerHTML = (todosState.truncated ? '<div id="scripts-empty">Showing a partial scan — this is a large project.</div>' : '') + todos.map((t) => {
     const rel = t.path.startsWith(state.projectRoot) ? t.path.slice(state.projectRoot.length + 1) : t.path;
     return `
@@ -4346,6 +4405,7 @@ async function boot() {
     const prefs = await window.nexo.getPrefs();
     Object.assign(uiState, prefs);
     applyTheme(uiState.theme, { skipSave: true });
+    updateDiscordPresence();
   } catch { /* keep defaults */ }
 
   monacoReadyPromise = new Promise((resolve) => {

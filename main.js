@@ -5,6 +5,18 @@ const https = require('https');
 const { execFile, spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const sodium = require('libsodium-wrappers');
+const { Client: DiscordRPCClient } = require('@xhayper/discord-rpc');
+
+// Safety net: log anything that slips through try/catch instead of letting
+// the process die silently or dump a raw stack to a terminal the user isn't
+// looking at. We still let Electron's default crash-reporter/dialog behavior
+// happen for uncaughtException — this only guarantees it gets logged first.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaught exception]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandled rejection]', reason);
+});
 
 // Only one instance of the app should ever run — if a file/folder is opened
 // via "Open with Nexo Dev" while the app is already running, Windows just
@@ -58,7 +70,20 @@ const SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024; // skip anything bigger than 2MB
 const SEARCH_MAX_MATCHES = 500;
 const SEARCH_MAX_FILES_WITH_MATCHES = 200;
 
-function walkForSearch(root, query, caseSensitive, results, budget, useRegex) {
+// Recursive directory walkers below (walkForSearch, walkForReplace,
+// walkForFileList) are all `async` and call this between entries so a big
+// project (thousands of files) doesn't freeze the whole app for the duration
+// of the walk — without it, these were synchronous top-to-bottom and blocked
+// the main process's event loop, which stalls every window's IPC, not just
+// the one that triggered the search.
+let __walkYieldCounter = 0;
+function maybeYieldToEventLoop() {
+  __walkYieldCounter++;
+  if (__walkYieldCounter % 150 !== 0) return null;
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function walkForSearch(root, query, caseSensitive, results, useRegex) {
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -71,10 +96,11 @@ function walkForSearch(root, query, caseSensitive, results, budget, useRegex) {
   }
   for (const entry of entries) {
     if (results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES || results.matches.length >= SEARCH_MAX_MATCHES) return;
+    await maybeYieldToEventLoop();
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      walkForSearch(full, query, caseSensitive, results, budget, useRegex);
+      await walkForSearch(full, query, caseSensitive, results, useRegex);
       continue;
     }
     const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
@@ -281,6 +307,8 @@ const DEFAULT_PREFS = {
   customThemes: [], // saved named presets: [{ id, name, bg, text, accent }]
   scriptsOrder: [],
   snippets: [], // [{ id, prefix, body, language }]
+  discordRpcEnabled: false,
+  discordClientId: '',
 };
 const prefsFilePath = () => path.join(app.getPath('userData'), 'prefs.json');
 function readPrefs() {
@@ -318,6 +346,8 @@ function sanitizePrefsPartial(partial) {
     clean.autoSaveDelayMs = Math.max(200, Math.min(10000, Number(partial.autoSaveDelayMs) || 1000));
   }
   if (partial.customShell !== undefined) clean.customShell = String(partial.customShell).trim().slice(0, 500);
+  if (partial.discordRpcEnabled !== undefined) clean.discordRpcEnabled = !!partial.discordRpcEnabled;
+  if (partial.discordClientId !== undefined) clean.discordClientId = String(partial.discordClientId).trim().replace(/[^0-9]/g, '').slice(0, 20);
   if (partial.customTheme !== undefined && typeof partial.customTheme === 'object' && partial.customTheme) {
     const src = partial.customTheme;
     const def = DEFAULT_PREFS.customTheme;
@@ -363,8 +393,12 @@ function sanitizePrefsPartial(partial) {
 
 ipcMain.handle('prefs:get', () => readPrefs());
 ipcMain.handle('prefs:set', (evt, partial) => {
-  const merged = { ...readPrefs(), ...sanitizePrefsPartial(partial || {}) };
+  const clean = sanitizePrefsPartial(partial || {});
+  const merged = { ...readPrefs(), ...clean };
   writePrefs(merged);
+  if (clean.discordRpcEnabled !== undefined || clean.discordClientId !== undefined) {
+    reconnectDiscordRpc();
+  }
   return merged;
 });
 
@@ -416,6 +450,111 @@ ipcMain.handle('session:save', (evt, projectRoot, data) => {
 ipcMain.handle('session:load', (evt, projectRoot) => {
   const sessions = readSessions();
   return sessions[projectRoot] || null;
+});
+
+// ---------- Discord Rich Presence ----------
+// Uses @xhayper/discord-rpc, a pure-JS client with no native build step —
+// it talks to the local Discord desktop app over its IPC pipe/socket, so
+// there's nothing to install beyond having Discord open. Fully optional:
+// off by default, and only ever connects once the user turns it on and
+// supplies their own Discord Application Client ID in Settings (create one
+// free at https://discord.com/developers/applications — Rich Presence
+// can't work without an app ID registered there).
+let discordClient = null;
+let discordConnected = false;
+let discordReconnectTimer = null;
+let discordConnecting = false;
+const discordSessionStart = Math.floor(Date.now() / 1000);
+let lastDiscordActivity = { details: 'Idle', state: 'No project open' };
+
+function clearDiscordReconnectTimer() {
+  if (discordReconnectTimer) {
+    clearTimeout(discordReconnectTimer);
+    discordReconnectTimer = null;
+  }
+}
+
+function destroyDiscordClient() {
+  clearDiscordReconnectTimer();
+  discordConnecting = false;
+  discordConnected = false;
+  if (discordClient) {
+    const toDestroy = discordClient;
+    discordClient = null;
+    try { toDestroy.destroy().catch(() => {}); } catch { /* already gone */ }
+  }
+}
+
+function applyDiscordActivity() {
+  if (!discordConnected || !discordClient || !discordClient.user) return;
+  const { details, state } = lastDiscordActivity;
+  discordClient.user.setActivity({
+    details: String(details || 'Idle').slice(0, 128),
+    state: state ? String(state).slice(0, 128) : undefined,
+    startTimestamp: discordSessionStart,
+    largeImageKey: 'nexo_logo',
+    largeImageText: 'Nexo Dev',
+    instance: false,
+  }).catch((err) => console.error('[discord-rpc] setActivity failed:', err.message));
+}
+
+function scheduleDiscordReconnect() {
+  clearDiscordReconnectTimer();
+  discordReconnectTimer = setTimeout(() => {
+    discordReconnectTimer = null;
+    connectDiscordRpc();
+  }, 15000); // Discord not running yet, or a transient drop — try again shortly.
+}
+
+function connectDiscordRpc() {
+  const prefs = readPrefs();
+  if (!prefs.discordRpcEnabled || !prefs.discordClientId) return;
+  if (discordClient || discordConnecting) return; // already connected or mid-attempt
+
+  discordConnecting = true;
+  const client = new DiscordRPCClient({ clientId: prefs.discordClientId });
+  discordClient = client;
+
+  client.on('ready', () => {
+    discordConnecting = false;
+    discordConnected = true;
+    applyDiscordActivity();
+  });
+
+  client.on('disconnected', () => {
+    discordConnected = false;
+    if (discordClient === client) {
+      discordClient = null;
+      scheduleDiscordReconnect();
+    }
+  });
+
+  client.login().catch((err) => {
+    // Most common cause: Discord desktop isn't running, or the client ID is
+    // wrong/not registered. Quiet retry rather than surfacing a dialog —
+    // this is a nice-to-have, not something that should interrupt coding.
+    console.error('[discord-rpc] connection failed:', err.message);
+    discordConnecting = false;
+    if (discordClient === client) {
+      discordClient = null;
+      scheduleDiscordReconnect();
+    }
+  });
+}
+
+function reconnectDiscordRpc() {
+  destroyDiscordClient();
+  connectDiscordRpc();
+}
+
+function setDiscordActivity(details, state) {
+  lastDiscordActivity = { details: details || 'Idle', state: state || null };
+  applyDiscordActivity();
+}
+
+ipcMain.handle('discord:set-activity', (evt, details, state) => {
+  setDiscordActivity(details, state);
+  return { ok: true };
 });
 
 // ---------- Window ----------
@@ -576,7 +715,11 @@ app.whenReady().then(() => {
   if (app.isPackaged) {
     setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 8000);
   }
+
+  connectDiscordRpc();
 });
+
+app.on('before-quit', () => destroyDiscordClient());
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -869,7 +1012,7 @@ ipcMain.handle('todos:scan', async (evt, projectRoot) => {
   if (!projectRoot) return { ok: false, error: 'No project open.' };
   const results = { matches: [], matchedFiles: 0 };
   const pattern = '\\b(TODO|FIXME|HACK)\\b:?\\s*(.*)';
-  walkForSearch(projectRoot, pattern, false, results, {}, true);
+  await walkForSearch(projectRoot, pattern, false, results, true);
   const tagRe = /\b(TODO|FIXME|HACK)\b:?\s*(.*)/i;
   const todos = [];
   for (const fileMatch of results.matches) {
@@ -892,7 +1035,7 @@ ipcMain.handle('search:text', async (evt, rootPath, query, opts = {}) => {
     try { new RegExp(query); } catch (err) { return { matches: [], truncated: false, error: err.message }; }
   }
   const results = { matches: [], matchedFiles: 0 };
-  walkForSearch(rootPath, query, !!opts.caseSensitive, results, {}, !!opts.useRegex);
+  await walkForSearch(rootPath, query, !!opts.caseSensitive, results, !!opts.useRegex);
   return {
     matches: results.matches,
     truncated: results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES || results.matches.length >= SEARCH_MAX_MATCHES,
@@ -903,7 +1046,7 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function walkForReplace(root, re, replacement, results) {
+async function walkForReplace(root, re, replacement, results) {
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
@@ -912,10 +1055,11 @@ function walkForReplace(root, re, replacement, results) {
   }
   for (const entry of entries) {
     if (results.filesChanged >= SEARCH_MAX_FILES_WITH_MATCHES) return;
+    await maybeYieldToEventLoop();
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      walkForReplace(full, re, replacement, results);
+      await walkForReplace(full, re, replacement, results);
       continue;
     }
     const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
@@ -972,14 +1116,14 @@ ipcMain.handle('search:replace-all', async (evt, rootPath, query, replacement, o
     safeReplacement = String(replacement).replace(/\$/g, '$$$$');
   }
   const results = { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [] };
-  walkForReplace(rootPath, re, safeReplacement, results);
+  await walkForReplace(rootPath, re, safeReplacement, results);
   return results;
 });
 
 // Flat recursive file list (paths only) for Quick Open — reuses the same
 // ignore rules as global search so it skips node_modules/.git/build output.
 const QUICK_OPEN_MAX_FILES = 5000;
-function walkForFileList(root, out) {
+async function walkForFileList(root, out) {
   if (out.length >= QUICK_OPEN_MAX_FILES) return;
   let entries;
   try {
@@ -989,9 +1133,10 @@ function walkForFileList(root, out) {
   }
   for (const entry of entries) {
     if (out.length >= QUICK_OPEN_MAX_FILES) return;
+    await maybeYieldToEventLoop();
     if (entry.isDirectory()) {
       if (SEARCH_IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      walkForFileList(path.join(root, entry.name), out);
+      await walkForFileList(path.join(root, entry.name), out);
       continue;
     }
     out.push(path.join(root, entry.name));
@@ -1000,7 +1145,7 @@ function walkForFileList(root, out) {
 
 ipcMain.handle('fs:list-files', async (evt, rootPath) => {
   const out = [];
-  walkForFileList(rootPath, out);
+  await walkForFileList(rootPath, out);
   return { files: out, truncated: out.length >= QUICK_OPEN_MAX_FILES };
 });
 
