@@ -9,11 +9,14 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "test": "node --test",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
     "dist:linux": "electron-builder --linux",
+    "dist:mac": "electron-builder --mac",
     "release": "electron-builder --win --publish always",
-    "release:linux": "electron-builder --linux --publish always"
+    "release:linux": "electron-builder --linux --publish always",
+    "release:mac": "electron-builder --mac --publish always"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -38,6 +41,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "lib/**/*",
       "renderer/**/*",
       "node_modules/monaco-editor/min/**/*",
       "!node_modules/monaco-editor/min-maps",
@@ -47,7 +51,10 @@
       "node_modules/dompurify/dist/purify.min.js",
       "node_modules/libsodium-wrappers/**/*",
       "node_modules/libsodium/**/*",
-      "node_modules/monaco-vim/dist/monaco-vim.umd.js"
+      "node_modules/monaco-vim/dist/monaco-vim.umd.js",
+      "node_modules/electron-updater/**/*",
+      "node_modules/builder-util-runtime/**/*",
+      "node_modules/@xhayper/discord-rpc/**/*"
     ],
     "publish": {
       "provider": "github",
@@ -90,6 +97,26 @@
       "category": "Development",
       "maintainer": "Nexus <support@nexorealm.org>",
       "synopsis": "A lightweight code editor and project manager."
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "renderer/icons/logo-256.png"
     },
     "nsis": {
       "oneClick": false,

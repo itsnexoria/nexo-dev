@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('nexo', {
   saveAsDialog: (defaultName) => ipcRenderer.invoke('dialog:save-as', defaultName),
   revealInFolder: (targetPath) => ipcRenderer.invoke('shell:reveal', targetPath),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  // Discord Rich Presence
+  setDiscordActivity: (details, state) => ipcRenderer.invoke('discord:set-activity', details, state),
   notifyReady: () => ipcRenderer.send('app:ready'),
 
   // global search
@@ -45,7 +47,7 @@ contextBridge.exposeInMainWorld('nexo', {
   createGithubRelease: (projectRoot, opts) => ipcRenderer.invoke('github:create-release', projectRoot, opts),
   setGithubSecret: (projectRoot, secretName, secretValue) => ipcRenderer.invoke('github:set-secret', projectRoot, secretName, secretValue),
   lintFile: (projectRoot, filePath, content) => ipcRenderer.invoke('eslint:lint', projectRoot, filePath, content),
-  checkOutdated: (projectRoot) => ipcRenderer.invoke('npm:outdated', projectRoot),
+  checkOutdated: (projectRoot, forceRefresh) => ipcRenderer.invoke('npm:outdated', projectRoot, !!forceRefresh),
   formatWithPrettier: (projectRoot, filePath, content) => ipcRenderer.invoke('prettier:format', projectRoot, filePath, content),
   scanTodos: (projectRoot) => ipcRenderer.invoke('todos:scan', projectRoot),
   getRecentFiles: () => ipcRenderer.invoke('recent-files:get'),
@@ -69,9 +71,6 @@ contextBridge.exposeInMainWorld('nexo', {
   loadSession: (projectRoot) => ipcRenderer.invoke('session:load', projectRoot),
   setPrefs: (partial) => ipcRenderer.invoke('prefs:set', partial),
 
-  // Discord Rich Presence
-  setDiscordActivity: (details, state) => ipcRenderer.invoke('discord:set-activity', details, state),
-
   // command runner (safe alternative to a full terminal)
   runCommand: (cwd, command) => ipcRenderer.invoke('term:run', cwd, command),
   killCommand: (id) => ipcRenderer.invoke('term:kill', id),
@@ -92,10 +91,16 @@ contextBridge.exposeInMainWorld('nexo', {
   rename: (oldPath, newName) => ipcRenderer.invoke('fs:rename', oldPath, newName),
   exists: (targetPath) => ipcRenderer.invoke('fs:exists', targetPath),
   statPath: (targetPath) => ipcRenderer.invoke('fs:stat', targetPath),
+  resolveEditorConfig: (projectRoot, filePath) => ipcRenderer.invoke('editorconfig:resolve', projectRoot, filePath),
   onOpenPath: (callback) => ipcRenderer.on('open-path', (evt, p) => callback(p)),
 
   // auto-update
   checkForUpdates: (manual) => ipcRenderer.invoke('update:check', manual),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
+  reloadWindow: () => ipcRenderer.invoke('app:reload'),
+  toggleDevTools: () => ipcRenderer.invoke('app:toggle-devtools'),
+  toggleFullscreen: () => ipcRenderer.invoke('app:toggle-fullscreen'),
+  showAbout: () => ipcRenderer.invoke('app:show-about'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdateAvailable: (callback) => ipcRenderer.on('update:available', (evt, version) => callback(version)),

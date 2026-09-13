@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0c0c10;
   --bg-1: #131316;
   --bg-2: #18181c;
@@ -26,6 +27,7 @@
 }
 
 body[data-theme="light"] {
+  color-scheme: light;
   --bg: #f6f6f8;
   --bg-1: #ffffff;
   --bg-2: #f0f0f3;
@@ -135,6 +137,41 @@ body {
 #project-name { color: var(--text-muted); font-size: 12px; padding-left: 10px; border-left: 1px solid var(--border-strong); }
 #titlebar-right { display: flex; gap: 8px; -webkit-app-region: no-drag; }
 
+/* ---------- Custom app menu (replaces the OS's plain default menu bar) ---------- */
+#app-menu { display: flex; align-items: center; -webkit-app-region: no-drag; }
+.app-menu-item {
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.app-menu-item:hover, .app-menu-item.open { background: var(--bg-3); color: var(--text); }
+#app-menu-dropdown {
+  position: fixed;
+  min-width: 220px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  z-index: 200;
+  padding: 5px;
+  -webkit-app-region: no-drag;
+}
+#app-menu-dropdown.hidden { display: none; }
+.app-menu-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.app-menu-option:hover { background: var(--bg-3); color: var(--text); }
+.app-menu-option .app-menu-shortcut { color: var(--text-muted); font-size: 11px; }
+.app-menu-separator { height: 1px; background: var(--border); margin: 5px 2px; }
+
 .tbtn {
   background: var(--bg-3);
   color: var(--text);
@@ -202,6 +239,7 @@ body {
 
 /* ---------- Zen / distraction-free mode ---------- */
 body.zen-mode #titlebar { display: none; }
+body.zen-mode #app-menu-dropdown { display: none; }
 body.zen-mode #app { height: 100%; }
 body.zen-mode #activitybar,
 body.zen-mode #sidebar,
@@ -298,12 +336,18 @@ body.zen-mode #statusbar { display: none; }
 .icon-btn:hover { color: var(--text); border-color: var(--accent); }
 
 #file-tree { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
-#file-tree::-webkit-scrollbar,
-#search-results::-webkit-scrollbar,
-#git-body::-webkit-scrollbar { width: 8px; }
-#file-tree::-webkit-scrollbar-thumb,
-#search-results::-webkit-scrollbar-thumb,
-#git-body::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+
+/* ---------- Scrollbars (applies app-wide — every scrollable panel gets the
+   themed scrollbar instead of the OS default, not just a hardcoded list) ---------- */
+* {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+*::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------- Search panel ---------- */
 #search-box { padding: 0 12px 8px; flex-shrink: 0; }
@@ -327,6 +371,10 @@ body.zen-mode #statusbar { display: none; }
 #btn-replace-all { flex-shrink: 0; white-space: nowrap; }
 #search-case-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); cursor: pointer; }
 #search-regex-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); cursor: pointer; margin-top: 4px; }
+input[type="checkbox"], input[type="radio"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 #search-regex-error {
   margin-top: 6px;
   padding: 6px 8px;
@@ -685,8 +733,6 @@ body.zen-mode #statusbar { display: none; }
   user-select: text;
 }
 .term-session-output.active { display: block; }
-.term-session-output::-webkit-scrollbar { width: 8px; }
-.term-session-output::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
 .term-cmd { color: var(--accent-a); font-weight: 700; }
 .term-err { color: var(--danger); }
 .term-exit { color: var(--text-muted); font-style: italic; }
@@ -856,6 +902,36 @@ body.zen-mode #statusbar { display: none; }
   display: flex;
   flex-direction: column;
   background: var(--bg);
+}
+#image-preview {
+  position: absolute; inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--bg);
+  background-image:
+    linear-gradient(45deg, var(--bg-2) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--bg-2) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--bg-2) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--bg-2) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+#image-preview-img {
+  max-width: 85%;
+  max-height: 75%;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+#image-preview-meta {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  padding: 4px 12px;
+  border-radius: 4px;
 }
 .md-toolbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -1066,6 +1142,8 @@ body.zen-mode #statusbar { display: none; }
 }
 #status-right { display: flex; gap: 14px; }
 #vim-status-bar { font-family: var(--code-font); color: var(--accent); }
+#status-eol { cursor: pointer; }
+#status-eol:hover { text-decoration: underline; }
 
 /* ---------- Context menu ---------- */
 #context-menu {

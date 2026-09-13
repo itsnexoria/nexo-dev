@@ -12,6 +12,12 @@
   <div id="titlebar">
     <div id="titlebar-left">
       <span id="brand"><img class="brand-logo" src="icons/logo-48.png" alt="" /><span class="brand-nexo">NEXO</span><span class="brand-dev">DEV</span></span>
+      <div id="app-menu">
+        <div class="app-menu-item" data-menu="file">File</div>
+        <div class="app-menu-item" data-menu="edit">Edit</div>
+        <div class="app-menu-item" data-menu="view">View</div>
+        <div class="app-menu-item" data-menu="help">Help</div>
+      </div>
       <span id="project-name"></span>
     </div>
     <div id="titlebar-right">
@@ -25,6 +31,7 @@
       </div>
     </div>
   </div>
+  <div id="app-menu-dropdown" class="hidden"></div>
 
   <div id="app">
     <!-- Activity rail -->
@@ -202,6 +209,10 @@
               </div>
               <div id="markdown-preview-content" class="markdown-preview-content"></div>
             </div>
+            <div id="image-preview" style="display:none;">
+              <img id="image-preview-img" alt="" />
+              <div id="image-preview-meta"></div>
+            </div>
             <div id="conflict-banner">
               <span id="conflict-count"></span>
               <div class="conflict-actions">
@@ -253,6 +264,7 @@
           <span id="status-right">
             <span id="vim-status-bar" class="hidden"></span>
             <span id="status-lang"></span>
+            <span id="status-eol" class="hidden" title="Click to change line ending"></span>
             <span id="status-pos"></span>
           </span>
         </div>

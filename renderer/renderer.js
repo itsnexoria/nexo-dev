@@ -52,6 +52,57 @@ function langFromName(name) {
   return LANG_MAP[ext] || 'plaintext';
 }
 
+// ---------------- .editorconfig ----------------
+// Indent style/size are applied to the model immediately on open (harmless —
+// they don't touch the document's actual content). Trailing-whitespace
+// trimming and final-newline enforcement are content changes, so those are
+// only applied at save time, in applyEditorConfigNormalization below.
+function applyEditorConfigToTab(tab) {
+  if (!window.nexo.resolveEditorConfig || !state.projectRoot) return;
+  window.nexo.resolveEditorConfig(state.projectRoot, tab.path).then((res) => {
+    if (!res || !res.ok) return;
+    const props = res.props || {};
+    tab.editorConfig = props;
+    if (!tab.model) return;
+    const updates = {};
+    if (props.indent_style === 'tab') updates.insertSpaces = false;
+    else if (props.indent_style === 'space') updates.insertSpaces = true;
+    let tabSize = null;
+    if (props.indent_size && props.indent_size !== 'tab') {
+      const n = parseInt(props.indent_size, 10);
+      if (!isNaN(n) && n > 0) tabSize = n;
+    } else if (props.tab_width) {
+      const n = parseInt(props.tab_width, 10);
+      if (!isNaN(n) && n > 0) tabSize = n;
+    }
+    if (tabSize) updates.tabSize = tabSize;
+    if (Object.keys(updates).length) tab.model.updateOptions(updates);
+  }).catch(() => {});
+}
+
+function applyEditorConfigNormalization(tab) {
+  const props = tab.editorConfig;
+  if (!props || !tab.model) return;
+  const model = tab.model;
+  let text = model.getValue();
+  let changed = false;
+  if (props.trim_trailing_whitespace === 'true') {
+    const trimmed = text.replace(/[ \t]+(?=\r?\n|$)/g, '');
+    if (trimmed !== text) { text = trimmed; changed = true; }
+  }
+  const eol = model.getEOL();
+  if (props.insert_final_newline === 'true') {
+    if (text.length && !text.endsWith(eol)) { text += eol; changed = true; }
+  } else if (props.insert_final_newline === 'false' && text.endsWith(eol)) {
+    text = text.slice(0, -eol.length);
+    changed = true;
+  }
+  if (changed) {
+    const fullRange = model.getFullModelRange();
+    model.pushEditOperations([], [{ range: fullRange, text }], () => null);
+  }
+}
+
 function fileIcon(name, isDir, open) {
   if (isDir) return open ? '📂' : '📁';
   const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
@@ -61,6 +112,25 @@ function fileIcon(name, isDir, open) {
     gitignore: '🚫', lock: '🔒',
   };
   return map[ext] || '📄';
+}
+
+// ---------------- Binary / image file detection ----------------
+// Opening these as text would read them as UTF-8, garble the content in
+// Monaco, and — worse — silently corrupt the file if the user hit Ctrl+S
+// without noticing. Images get a lightweight preview instead; everything
+// else in this list just refuses to open as text.
+const IMAGE_FILE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg']);
+const UNSUPPORTED_BINARY_EXTENSIONS = new Set([
+  'exe', 'dll', 'so', 'dylib', 'bin', 'zip', 'gz', 'tar', 'rar', '7z', 'pdf',
+  'mp3', 'wav', 'ogg', 'flac', 'mp4', 'mov', 'avi', 'mkv', 'webm',
+  'woff', 'woff2', 'ttf', 'eot', 'otf', 'db', 'sqlite', 'sqlite3',
+  'class', 'o', 'pyc', 'node', 'wasm',
+]);
+function getFileKind(name) {
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if (IMAGE_FILE_EXTENSIONS.has(ext)) return 'image';
+  if (UNSUPPORTED_BINARY_EXTENSIONS.has(ext)) return 'binary';
+  return 'text';
 }
 
 // ---------------- Monaco setup ----------------
@@ -926,45 +996,90 @@ async function handleTreeDrop(sourcePath, destDir) {
 
 // ---------------- Tabs / Editor ----------------
 async function openFile(filePath, opts = {}) {
-  if (!monacoLoaded) {
-    document.getElementById('status-path').textContent = 'Loading editor…';
-    await monacoReadyPromise;
-  }
   let tab = state.openTabs.find((t) => t.path === filePath);
   if (!tab) {
-    const res = await window.nexo.readFile(filePath);
-    if (!res.ok) {
-      if (!opts.silent) alert(`Could not open file:\n${res.error}`);
+    const name = filePath.split(/[\\/]/).pop();
+    const kind = getFileKind(name);
+    if (kind === 'binary') {
+      if (!opts.silent) alert(`"${name}" can't be opened — it looks like a binary file rather than text.`);
       return false;
     }
-    const name = filePath.split(/[\\/]/).pop();
-    const lang = langFromName(name);
-    const isMarkdown = /\.(md|markdown)$/i.test(name);
-    const model = monaco.editor.createModel(res.content, lang);
-    model.onDidChangeContent(() => {
-      const t = state.openTabs.find((x) => x.path === filePath);
-      if (t && !t.modified) { t.modified = true; renderTabs(); }
-      if (editor && editor.getModel() === model) {
-        updateConflictBanner();
-        if (t && t.isMarkdown && t.mdMode === 'preview') renderMarkdownPreview(t);
-        maybeAutoSave(filePath);
+    if (kind === 'image') {
+      tab = { path: filePath, name, model: null, modified: false, byteLength: 0, isImage: true, isMarkdown: false, mdMode: null, pinned: false };
+      state.openTabs.push(tab);
+      if (splitState.visible) updateSplitTabOptions();
+    } else {
+      if (!monacoLoaded) {
+        document.getElementById('status-path').textContent = 'Loading editor…';
+        await monacoReadyPromise;
       }
-      if (t && splitState.visible && splitState.tabPath === filePath && splitState.mdMode === 'preview') {
-        renderSplitMarkdownPreview(t);
+      const res = await window.nexo.readFile(filePath);
+      if (!res.ok) {
+        if (!opts.silent) alert(`Could not open file:\n${res.error}`);
+        return false;
       }
-      if (t && state.activeTab === filePath) scheduleOutlineRefresh();
-      if (t) scheduleLint(filePath);
-    });
-    tab = { path: filePath, name, model, modified: false, byteLength: res.content.length, isMarkdown, mdMode: isMarkdown ? 'preview' : null, pinned: false };
-    state.openTabs.push(tab);
-    if (splitState.visible) updateSplitTabOptions();
-    window.nexo.watchFile(filePath);
+      const lang = langFromName(name);
+      const isMarkdown = /\.(md|markdown)$/i.test(name);
+      const model = monaco.editor.createModel(res.content, lang);
+      model.onDidChangeContent(() => {
+        const t = state.openTabs.find((x) => x.path === filePath);
+        if (t && !t.modified) { t.modified = true; renderTabs(); }
+        if (editor && editor.getModel() === model) {
+          updateConflictBanner();
+          if (t && t.isMarkdown && t.mdMode === 'preview') renderMarkdownPreview(t);
+          maybeAutoSave(filePath);
+        }
+        if (t && splitState.visible && splitState.tabPath === filePath && splitState.mdMode === 'preview') {
+          renderSplitMarkdownPreview(t);
+        }
+        if (t && state.activeTab === filePath) scheduleOutlineRefresh();
+        if (t) scheduleLint(filePath);
+      });
+      tab = { path: filePath, name, model, modified: false, byteLength: res.content.length, isMarkdown, mdMode: isMarkdown ? 'preview' : null, pinned: false };
+      state.openTabs.push(tab);
+      if (splitState.visible) updateSplitTabOptions();
+      window.nexo.watchFile(filePath);
+      applyEditorConfigToTab(tab);
+    }
   }
   if (!opts.skipActivate) activateTab(filePath);
   if (!opts.silent) renderTree();
   if (!opts.silent) window.nexo.addRecentFile(filePath, state.projectRoot);
   return true;
 }
+
+function toFileUrl(p) {
+  let pathName = p.replace(/\\/g, '/');
+  if (!pathName.startsWith('/')) pathName = '/' + pathName;
+  return 'file://' + encodeURI(pathName).replace(/#/g, '%23');
+}
+
+function showImagePreview(tab) {
+  const box = document.getElementById('image-preview');
+  const img = document.getElementById('image-preview-img');
+  const meta = document.getElementById('image-preview-meta');
+  meta.textContent = tab.name;
+  img.onload = () => { meta.textContent = `${tab.name} — ${img.naturalWidth}×${img.naturalHeight}`; };
+  img.onerror = () => { meta.textContent = `${tab.name} — couldn't load preview`; };
+  img.src = toFileUrl(tab.path);
+  box.style.display = 'flex';
+}
+
+function updateEolIndicator(model) {
+  const el = document.getElementById('status-eol');
+  if (!model) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.textContent = model.getEOL() === '\r\n' ? 'CRLF' : 'LF';
+}
+document.getElementById('status-eol').addEventListener('click', () => {
+  const tab = state.openTabs.find((t) => t.path === state.activeTab);
+  if (!tab || tab.isImage || !tab.model) return;
+  const current = tab.model.getEOL();
+  const next = current === '\r\n' ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF;
+  tab.model.pushEOL(next);
+  updateEolIndicator(tab.model);
+  if (!tab.modified) { tab.modified = true; renderTabs(); }
+});
 
 // ---------------- Discord Rich Presence ----------------
 // Debounced so rapid tab switches or fast typing don't spam the IPC call —
@@ -996,6 +1111,23 @@ function activateTab(filePath) {
   if (diffContainer) diffContainer.style.display = 'none';
   gitState.activePath = null;
   gitState.activeCommit = null;
+  renderTabs();
+  renderTree();
+  renderBreadcrumb();
+
+  if (tab.isImage) {
+    document.getElementById('editor-container').style.display = 'none';
+    document.getElementById('markdown-preview').style.display = 'none';
+    document.getElementById('md-preview-btn').classList.add('hidden');
+    document.getElementById('status-path').textContent = filePath;
+    document.getElementById('status-lang').textContent = 'Image';
+    updateEolIndicator(null);
+    showImagePreview(tab);
+    updateDiscordPresence();
+    return;
+  }
+  document.getElementById('image-preview').style.display = 'none';
+
   editor.setModel(tab.model);
   applyPerfOptionsForFile(tab.byteLength || 0);
   if (tab.viewState) editor.restoreViewState(tab.viewState);
@@ -1006,9 +1138,7 @@ function activateTab(filePath) {
   }
   document.getElementById('status-path').textContent = filePath;
   document.getElementById('status-lang').textContent = tab.model.getModeId ? tab.model.getModeId() : '';
-  renderTabs();
-  renderTree();
-  renderBreadcrumb();
+  updateEolIndicator(tab.model);
 
   if (tab.isMarkdown && tab.mdMode === 'preview') {
     document.getElementById('editor-container').style.display = 'none';
@@ -1122,7 +1252,7 @@ function closeTab(filePath) {
   closedTabsStack.push(filePath);
   if (closedTabsStack.length > 20) closedTabsStack.shift();
 
-  tab.model.dispose();
+  if (tab.model) tab.model.dispose();
   state.openTabs.splice(idx, 1);
   if (state.activeTab === filePath) {
     const next = state.openTabs[idx] || state.openTabs[idx - 1];
@@ -1239,7 +1369,7 @@ async function formatTabWithPrettier(tab) {
 async function formatActiveDocument() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
-  if (!tab) return;
+  if (!tab || tab.isImage) return;
   const formatted = await formatTabWithPrettier(tab);
   if (!formatted) flashToast('Nothing to format — no local Prettier install found, or this file type isn\'t supported.');
 }
@@ -1247,12 +1377,13 @@ async function formatActiveDocument() {
 async function saveActiveTab() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
-  if (!tab) return;
+  if (!tab || tab.isImage) return;
   if (scanConflicts(tab.model).length) {
     const proceed = confirm('This file still has unresolved merge conflict markers (<<<<<<< / ======= / >>>>>>>).\n\nSave anyway?');
     if (!proceed) return;
   }
   if (uiState.formatOnSave) await formatTabWithPrettier(tab);
+  applyEditorConfigNormalization(tab);
   const res = await window.nexo.writeFile(tab.path, tab.model.getValue());
   if (!res.ok) { alert(`Could not save file:\n${res.error}`); return; }
   tab.modified = false;
@@ -1264,13 +1395,14 @@ async function saveActiveTab() {
 async function saveActiveTabAs() {
   if (!state.activeTab) return;
   const tab = state.openTabs.find((t) => t.path === state.activeTab);
-  if (!tab) return;
+  if (!tab || tab.isImage) return;
   if (scanConflicts(tab.model).length) {
     const proceed = confirm('This file still has unresolved merge conflict markers (<<<<<<< / ======= / >>>>>>>).\n\nSave anyway?');
     if (!proceed) return;
   }
   const newPath = await window.nexo.saveAsDialog(tab.name);
   if (!newPath) return;
+  applyEditorConfigNormalization(tab);
   const res = await window.nexo.writeFile(newPath, tab.model.getValue());
   if (!res.ok) { alert(`Could not save file:\n${res.error}`); return; }
   await openFile(newPath);
@@ -1309,13 +1441,16 @@ async function addToGitignore(targetPath, isDir) {
 }
 
 async function confirmBulkDelete(paths) {
-  const ok = confirm(`Delete ${paths.length} selected items? This cannot be undone.`);
+  const ok = confirm(`Delete ${paths.length} selected items?`);
   if (!ok) return;
+  let anyPermanent = false;
   for (const p of paths) {
-    await window.nexo.deleteItem(p);
+    const res = await window.nexo.deleteItem(p);
+    if (res.ok && res.trashed === false) anyPermanent = true;
     const toClose = state.openTabs.filter((t) => t.path === p || t.path.startsWith(p + '/') || t.path.startsWith(p + '\\'));
     for (const t of toClose) { t.modified = false; closeTab(t.path); }
   }
+  if (anyPermanent) flashToast("Some items couldn't be moved to the system trash and were permanently deleted.");
   state.selectedPaths.clear();
   await renderTree();
 }
@@ -1490,10 +1625,11 @@ function promptRename(targetPath) {
 
 async function confirmDelete(targetPath, isDirectory) {
   const name = targetPath.split(/[\\/]/).pop();
-  const ok = confirm(`Delete ${isDirectory ? 'folder' : 'file'} "${name}"? This cannot be undone.`);
+  const ok = confirm(`Delete "${name}"?`);
   if (!ok) return;
   const res = await window.nexo.deleteItem(targetPath);
   if (!res.ok) { alert(`Could not delete:\n${res.error}`); return; }
+  if (res.trashed === false) flashToast(`"${name}" was permanently deleted (couldn't move it to the system trash).`);
   // close any open tabs under this path
   const toClose = state.openTabs.filter((t) => t.path === targetPath || t.path.startsWith(targetPath + '/') || t.path.startsWith(targetPath + '\\'));
   for (const t of toClose) {
@@ -1544,6 +1680,7 @@ function updateSplitTabOptions() {
   const select = document.getElementById('split-tab-select');
   select.innerHTML = '';
   for (const tab of state.openTabs) {
+    if (tab.isImage) continue; // images can't be shown in the split pane
     const opt = document.createElement('option');
     opt.value = tab.path;
     opt.textContent = tab.name;
@@ -1594,7 +1731,7 @@ document.getElementById('split-md-toggle-btn').addEventListener('click', () => {
 async function showInSplit(filePath) {
   if (!monacoLoaded) await monacoReadyPromise;
   const tab = state.openTabs.find((t) => t.path === filePath);
-  if (!tab) return;
+  if (!tab || tab.isImage) return;
   ensureSplitEditor();
   splitState.tabPath = filePath;
   splitState.mdMode = tab.isMarkdown ? 'preview' : null;
@@ -3391,22 +3528,6 @@ function renderSettingsPage() {
     window.nexo.setPrefs({ formatOnSave: uiState.formatOnSave });
   });
 
-  const discordEnabledToggle = document.getElementById('set-discord-enabled');
-  discordEnabledToggle.addEventListener('click', () => {
-    uiState.discordRpcEnabled = !uiState.discordRpcEnabled;
-    discordEnabledToggle.classList.toggle('on', uiState.discordRpcEnabled);
-    window.nexo.setPrefs({ discordRpcEnabled: uiState.discordRpcEnabled });
-    if (uiState.discordRpcEnabled) updateDiscordPresence();
-  });
-  document.getElementById('set-discord-client-id').addEventListener('change', (e) => {
-    uiState.discordClientId = e.target.value.trim();
-    window.nexo.setPrefs({ discordClientId: uiState.discordClientId });
-  });
-  document.getElementById('discord-dev-portal-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.nexo.openExternal('https://discord.com/developers/applications');
-  });
-
   if (state.projectRoot) {
     document.getElementById('btn-open-project-settings').addEventListener('click', handleOpenProjectSettings);
     document.getElementById('btn-save-project-settings').addEventListener('click', handleSaveCurrentAsProjectSettings);
@@ -3429,6 +3550,22 @@ function renderSettingsPage() {
   document.getElementById('set-custom-shell').addEventListener('change', (e) => {
     uiState.customShell = e.target.value.trim();
     window.nexo.setPrefs({ customShell: uiState.customShell });
+  });
+
+  const discordEnabledToggle = document.getElementById('set-discord-enabled');
+  discordEnabledToggle.addEventListener('click', () => {
+    uiState.discordRpcEnabled = !uiState.discordRpcEnabled;
+    discordEnabledToggle.classList.toggle('on', uiState.discordRpcEnabled);
+    window.nexo.setPrefs({ discordRpcEnabled: uiState.discordRpcEnabled });
+    if (uiState.discordRpcEnabled) updateDiscordPresence();
+  });
+  document.getElementById('set-discord-client-id').addEventListener('change', (e) => {
+    uiState.discordClientId = e.target.value.trim();
+    window.nexo.setPrefs({ discordClientId: uiState.discordClientId });
+  });
+  document.getElementById('discord-dev-portal-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.nexo.openExternal('https://discord.com/developers/applications');
   });
 
   document.getElementById('gh-token-help').addEventListener('click', (e) => {
@@ -3636,6 +3773,122 @@ document.addEventListener('click', (e) => {
   if (!dropdown.classList.contains('hidden') && !dropdown.contains(e.target) && e.target.id !== 'btn-theme-toggle') {
     dropdown.classList.add('hidden');
   }
+});
+
+// ---------------- Custom app menu (File/Edit/View/Help) ----------------
+// Replaces Electron's plain default menu bar with one that matches the
+// app's own theme. The real menu built in main.js (buildMenu) is still
+// registered — just auto-hidden, with Alt as a fallback to reveal it — so
+// every accelerator (Ctrl+S etc.) keeps working exactly as before; this is
+// just what's actually visible day to day.
+function monacoEditAction(actionId) {
+  return () => { if (editor) editor.trigger('app-menu', actionId, null); };
+}
+
+const APP_MENUS = {
+  file: [
+    { label: 'Open Folder…', shortcut: 'Ctrl+O', run: handleOpenFolder },
+    { label: 'New File', shortcut: 'Ctrl+N', run: handleNewFile },
+    { separator: true },
+    { label: 'Save', shortcut: 'Ctrl+S', run: saveActiveTab },
+    { label: 'Save As…', shortcut: 'Ctrl+Shift+S', run: saveActiveTabAs },
+    { separator: true },
+    { label: 'Exit', run: () => window.nexo.quitApp() },
+  ],
+  edit: [
+    { label: 'Undo', shortcut: 'Ctrl+Z', run: monacoEditAction('undo') },
+    { label: 'Redo', shortcut: 'Ctrl+Y', run: monacoEditAction('redo') },
+    { separator: true },
+    { label: 'Cut', shortcut: 'Ctrl+X', run: monacoEditAction('editor.action.clipboardCutAction') },
+    { label: 'Copy', shortcut: 'Ctrl+C', run: monacoEditAction('editor.action.clipboardCopyAction') },
+    { label: 'Paste', shortcut: 'Ctrl+V', run: monacoEditAction('editor.action.clipboardPasteAction') },
+    { label: 'Select All', shortcut: 'Ctrl+A', run: monacoEditAction('editor.action.selectAll') },
+    { separator: true },
+    { label: 'Find in Files', shortcut: 'Ctrl+Shift+F', run: () => switchRailView('search') },
+    { label: 'Source Control', shortcut: 'Ctrl+Shift+G', run: () => switchRailView('git') },
+    { label: 'Format Document', run: formatActiveDocument },
+  ],
+  view: [
+    {
+      label: 'Toggle Sidebar',
+      shortcut: 'Ctrl+B',
+      run: () => {
+        const sb = document.getElementById('sidebar');
+        sb.style.display = sb.style.display === 'none' ? 'flex' : 'none';
+      },
+    },
+    { label: 'Toggle Terminal', shortcut: 'Ctrl+`', run: () => toggleTerminal() },
+    { label: 'Toggle Split Editor', shortcut: 'Ctrl+\\', run: () => toggleSplit() },
+    { label: 'Toggle Zen Mode', shortcut: 'Ctrl+K Z', run: () => toggleZenMode() },
+    { separator: true },
+    { label: 'Reload Window', run: () => window.nexo.reloadWindow() },
+    { label: 'Toggle Developer Tools', run: () => window.nexo.toggleDevTools() },
+    { separator: true },
+    { label: 'Toggle Full Screen', run: () => window.nexo.toggleFullscreen() },
+  ],
+  help: [
+    { label: 'Check for Updates…', run: () => window.nexo.checkForUpdates(true) },
+    { separator: true },
+    { label: 'About Nexo Dev', run: () => window.nexo.showAbout() },
+  ],
+};
+
+function closeAppMenu() {
+  document.getElementById('app-menu-dropdown').classList.add('hidden');
+  document.querySelectorAll('.app-menu-item.open').forEach((el) => el.classList.remove('open'));
+}
+
+function openAppMenu(menuId, buttonEl) {
+  const dropdown = document.getElementById('app-menu-dropdown');
+  const wasOpenForThisButton = buttonEl.classList.contains('open');
+  closeAppMenu();
+  if (wasOpenForThisButton) return; // clicking the already-open menu's own button just closes it
+  const items = APP_MENUS[menuId] || [];
+  dropdown.innerHTML = '';
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement('div');
+      sep.className = 'app-menu-separator';
+      dropdown.appendChild(sep);
+      continue;
+    }
+    const opt = document.createElement('div');
+    opt.className = 'app-menu-option';
+    opt.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.shortcut ? `<span class="app-menu-shortcut">${escapeHtml(item.shortcut)}</span>` : ''}`;
+    opt.addEventListener('click', () => {
+      closeAppMenu();
+      item.run();
+    });
+    dropdown.appendChild(opt);
+  }
+  const rect = buttonEl.getBoundingClientRect();
+  dropdown.style.left = `${Math.round(rect.left)}px`;
+  dropdown.style.top = `${Math.round(rect.bottom + 4)}px`;
+  dropdown.classList.remove('hidden');
+  buttonEl.classList.add('open');
+}
+
+document.querySelectorAll('.app-menu-item').forEach((btn) => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openAppMenu(btn.dataset.menu, btn);
+  });
+  // Moving the mouse onto a different top-level item while a menu is
+  // already open switches straight to it, matching native menu-bar feel.
+  btn.addEventListener('mouseenter', () => {
+    if (document.querySelector('.app-menu-item.open') && !btn.classList.contains('open')) {
+      openAppMenu(btn.dataset.menu, btn);
+    }
+  });
+});
+document.addEventListener('click', (e) => {
+  const dropdown = document.getElementById('app-menu-dropdown');
+  if (!dropdown.classList.contains('hidden') && !dropdown.contains(e.target) && !e.target.closest('.app-menu-item')) {
+    closeAppMenu();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAppMenu();
 });
 
 // ---------------- Outline (symbols) ----------------
@@ -3885,18 +4138,18 @@ document.getElementById('scripts-tab-scripts').addEventListener('click', () => s
 document.getElementById('scripts-tab-outdated').addEventListener('click', () => switchScriptsSubtab('outdated'));
 
 document.getElementById('btn-scripts-refresh').addEventListener('click', () => {
-  if (scriptsSubtab === 'outdated') loadOutdated();
+  if (scriptsSubtab === 'outdated') loadOutdated(true);
   else loadScripts();
 });
 
 // ---------------- Outdated dependencies ----------------
 let outdatedState = { packages: null, error: null, loading: false };
 
-async function loadOutdated() {
+async function loadOutdated(forceRefresh = false) {
   if (!state.projectRoot) { outdatedState = { packages: null, error: 'Open a folder first.', loading: false }; renderOutdatedList(); return; }
   outdatedState = { packages: null, error: null, loading: true };
   renderOutdatedList();
-  const res = await window.nexo.checkOutdated(state.projectRoot);
+  const res = await window.nexo.checkOutdated(state.projectRoot, forceRefresh);
   if (res.reason === 'no-package-json') {
     outdatedState = { packages: null, error: 'No package.json found in this project.', loading: false };
   } else if (!res.ok) {
@@ -4169,6 +4422,7 @@ document.getElementById('btn-cloudflare-deploy').addEventListener('click', handl
 let todosState = { todos: null, error: null, loading: false };
 
 async function loadTodos() {
+  const box = document.getElementById('todos-list');
   if (!state.projectRoot) { todosState = { todos: null, error: 'Open a folder first.', loading: false }; renderTodosPanel(); return; }
   todosState = { todos: null, error: null, loading: true };
   renderTodosPanel();
@@ -4187,6 +4441,7 @@ function renderTodosPanel() {
   if (todosState.error) { box.innerHTML = `<div id="scripts-empty">${escapeHtml(todosState.error)}</div>`; return; }
   const todos = todosState.todos || [];
   if (!todos.length) { box.innerHTML = '<div id="scripts-empty">No TODO, FIXME, or HACK comments found.</div>'; return; }
+  const rootSep = state.projectRoot.includes('\\') ? '\\' : '/';
   box.innerHTML = (todosState.truncated ? '<div id="scripts-empty">Showing a partial scan — this is a large project.</div>' : '') + todos.map((t) => {
     const rel = t.path.startsWith(state.projectRoot) ? t.path.slice(state.projectRoot.length + 1) : t.path;
     return `

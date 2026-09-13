@@ -1,6 +1,6 @@
 # Nexo Dev
 
-A lightweight, standalone code editor and project manager for Windows — built with Electron + Monaco (the same editor engine as VS Code).
+A lightweight, standalone code editor and project manager for Windows, macOS, and Linux — built with Electron + Monaco (the same editor engine as VS Code).
 
 ## Features
 
@@ -26,8 +26,14 @@ Five views, switchable from the icon rail on the far left. Files, Search, and Gi
 - **Tab improvements** — drag tabs to reorder them; click the 📌 to pin a tab (pinned tabs stay grouped at the front and are easy to spot); `Ctrl+Shift+T` reopens the most recently closed tab.
 - **.gitignore-aware tree** — files and folders matched by `.gitignore` are hidden by default (the usual `node_modules`, build output, etc.), with a toggle (👁‍🗨 in the Explorer header) to reveal them when you need to.
 - **External change detection** — if an open file changes on disk from outside the app (another program, a `git pull`, a build script), it reloads automatically if you have no unsaved changes, or asks first if you do. Doesn't trigger on the app's own saves.
+- **Custom branded menu bar** (File / Edit / View / Help) built right into the titlebar instead of the OS's plain default menu strip — it's the same commands and keyboard shortcuts (Ctrl+S, Ctrl+O, etc. still work exactly as before), just styled to match the app instead of looking like generic OS chrome. The native menu is still registered under the hood (so every accelerator keeps working) but auto-hidden; Alt reveals it as a fallback if you ever need to bypass the custom one.
+- Themed scrollbars and checkboxes everywhere — every scrollable panel and every checkbox uses the app's own colors instead of falling back to the OS default, and it adapts automatically across all five themes rather than being hardcoded to one.
 - **Multi-select in the tree** — `Ctrl+Click` to toggle individual files/folders, `Shift+Click` to select a range, then right-click for a bulk **Delete N Items** / **Copy Paths** / **Copy Relative Paths** action.
 - **Copy Path / Copy Relative Path** — available in the tree's right-click menu for any single file or folder too.
+- **Deleting goes to your system trash/recycle bin**, not a permanent delete — so it's recoverable the normal OS way. Falls back to a real delete only if trashing isn't available on your system, and tells you when that happens.
+- **Image preview** — click a `.png`/`.jpg`/`.svg`/etc. in the tree and it opens as an image preview (with dimensions shown) instead of garbled text. Other binary file types (executables, archives, fonts, media) are refused with a clear message rather than opened as corrupted text.
+- **`.editorconfig` support** — indent style/size are picked up automatically from any `.editorconfig` file in the project (closer files override farther ones, same as every other editor); trailing-whitespace trimming and final-newline enforcement are applied on save.
+- **Line ending indicator** — the status bar shows LF/CRLF for the current file; click it to switch.
 - **Keyboard shortcuts**: `Ctrl+O` open folder, `Ctrl+N` new file, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+W` close tab, `Ctrl+Shift+T` reopen closed tab, `Ctrl+B` toggle sidebar, `` Ctrl+` `` toggle terminal, `Ctrl+\` toggle split editor, `Ctrl+K Z` toggle zen mode, `Ctrl+=`/`Ctrl+-`/`Ctrl+0` font zoom
 
 ### 🔎 Search — find & replace across files
@@ -73,6 +79,7 @@ A proper settings page (pinned at the bottom of the icon rail) instead of scatte
 - **Editor** — Auto Save toggle with a configurable delay
 - **Sites Monitor** — default check interval used whenever you add a new site (still changeable per-site afterward)
 - **Terminal** — an optional custom shell override (e.g. point it at PowerShell or Git Bash instead of the default Command Prompt)
+- **Discord Rich Presence** — optional, off by default. Shows your current project and file on your Discord profile while both apps are open. Needs your own free Discord Application Client ID (create one at [discord.com/developers/applications](https://discord.com/developers/applications), linked right from the settings row) — Nexo Dev talks to your local Discord desktop app over its IPC socket, so there's nothing else to install. Quietly retries in the background if Discord isn't running yet.
 - **About** — app info
 
 ## Performance
@@ -170,17 +177,34 @@ npm start
 
 This launches the app in an Electron window without packaging anything — good for quick iteration.
 
-## Build a real Windows app (.exe)
+## Tests
 
 ```bash
-npm run dist
+npm test
 ```
 
-This uses `electron-builder` to produce:
-- an **NSIS installer** (`dist/Nexo Dev Setup <version>.exe`) — the one most users want
-- a **portable .exe** (`dist/Nexo Dev <version>.exe`) — no install needed, just run it
+Runs the unit tests (Node's built-in test runner, no extra dependencies) covering:
+- `lib/editorconfig.js` — `.editorconfig` parsing, glob matching, precedence between nested config files
+- `lib/search.js` — global search, project-wide replace, and the Quick Open file listing (ignore rules, binary detection, regex safety, replacement escaping)
+- `lib/git-parse.js` — parsing `git status --porcelain` and `git blame --line-porcelain` output, and pulling owner/repo out of a GitHub remote URL
+- `lib/prefs.js` — the settings sanitizer that runs on everything coming in over `prefs:set`, making sure malformed values always fall back to a safe default instead of being written to disk as-is
 
-Both will appear in the `dist/` folder after the build finishes. The first build downloads Electron's prebuilt binaries, so it needs an internet connection.
+These are the parts of the codebase decoupled enough from Electron to unit test directly; everything else is exercised by hand since it depends on the actual Electron runtime (windows, IPC, dialogs).
+
+## Build a real app (.exe / .dmg / AppImage)
+
+```bash
+npm run dist          # Windows
+npm run dist:mac      # macOS
+npm run dist:linux    # Linux
+```
+
+This uses `electron-builder` to produce, depending on which command you ran:
+- **Windows** (`npm run dist`) — an **NSIS installer** (`dist/Nexo Dev Setup <version>.exe`, the one most users want) and a **portable .exe** (`dist/Nexo Dev <version>.exe`, no install needed)
+- **macOS** (`npm run dist:mac`) — a **.dmg** and a **.zip**, for both Intel and Apple Silicon. Note: the app icon config points at `renderer/icons/logo-256.png`; electron-builder wants at least 512×512 (ideally 1024×1024) to generate a crisp `.icns`, so swap in a bigger source image before shipping a real mac build.
+- **Linux** (`npm run dist:linux`) — an **AppImage** and a **.deb**
+
+All of these land in the `dist/` folder after the build finishes. The first build downloads Electron's prebuilt binaries, so it needs an internet connection.
 
 **About the "Open with Nexo Dev" right-click menu:** those Explorer context menu entries are registered by the NSIS installer at install time (`build/installer.nsh`), per-user in the registry — no admin rights needed. This means:
 - Only the **installer build** gets them; the portable `.exe` has no install step to run the registration, so it won't add context menu entries.
@@ -193,6 +217,17 @@ Both will appear in the `dist/` folder after the build finishes. The first build
 nexo-dev/
   main.js          Electron main process — window, menu, filesystem/dialog/git/search/monitoring IPC handlers
   preload.js        Secure bridge exposing window.nexo.* to the renderer
+  lib/
+    editorconfig.js  .editorconfig parsing/resolution — kept dependency-free from Electron so it's unit-testable
+    search.js        Global search, replace-all, and Quick Open's file walker — same reasoning
+    git-parse.js     git status/blame porcelain parsers + GitHub remote URL parsing — same reasoning
+    prefs.js         Preference defaults + sanitization for prefs:set — same reasoning
+  test/
+    editorconfig.test.js  Unit tests for lib/editorconfig.js
+    search.test.js         Unit tests for lib/search.js
+    git-parse.test.js      Unit tests for lib/git-parse.js
+    prefs.test.js           Unit tests for lib/prefs.js
+    (run all of these with `npm test`)
   renderer/
     index.html       App shell (activity rail, sidebar panels, tabs, editor, welcome screens)
     style.css         Dark theme, Nexo-branded red/chrome accent
@@ -217,6 +252,7 @@ nexo-dev/
 - The gitignore-aware tree filter uses `git ls-files --others --ignored --exclude-standard --directory` to get the ignored-paths list — the `--directory` flag collapses a wholly-ignored folder into one entry instead of listing every file inside it, so filtering a big ignored folder like `node_modules` stays cheap.
 - External change detection only watches files you actually have open (not the whole project), and guards against reacting to the app's own writes: every successful save records a timestamp, and file-watcher events within a second of that are ignored as likely self-triggered.
 - Both the file tree and the Git status panel guard against overlapping refreshes with a "latest wins" token — if two refreshes are in flight at once (e.g. staging a file while another refresh is still running), the slower one's stale result gets discarded instead of silently overwriting the newer, correct one. This is what was causing the commit button to stay disabled right after staging a file — fixed by applying the same pattern used for the file tree's equivalent race.
+- GitHub remote URLs with a trailing slash (`https://github.com/owner/repo/`, which some tools/configs produce) parse correctly — a trailing slash used to leak into the parsed repo name and would have made GitHub API calls 404.
 
 ## Adding an app icon
 
