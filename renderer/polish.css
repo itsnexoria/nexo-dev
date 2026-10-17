@@ -1,0 +1,272 @@
+/* =====================================================================
+   Nexo Dev — design polish layer (loaded after style.css)
+   Pure CSS overrides: refined tokens, depth, motion, focus, scrollbars.
+   ===================================================================== */
+
+:root {
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --dur: 140ms;
+  --shadow-1: 0 1px 2px rgba(0,0,0,.35);
+  --shadow-2: 0 8px 28px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.04);
+  --glass: rgba(24,24,30,.72);
+  --glow: color-mix(in srgb, var(--accent-a) 35%, transparent);
+  --hover-bg: color-mix(in srgb, var(--text) 6%, transparent);
+  --ui-font: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, Roboto, sans-serif;
+}
+body[data-theme="light"] {
+  --shadow-1: 0 1px 2px rgba(20,20,40,.08);
+  --shadow-2: 0 10px 30px rgba(20,20,40,.16), 0 0 0 1px rgba(0,0,0,.05);
+  --glass: rgba(255,255,255,.78);
+}
+
+body {
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(1200px 500px at 85% -10%, color-mix(in srgb, var(--accent-a) 7%, transparent), transparent 60%),
+    var(--bg);
+}
+::selection { background: color-mix(in srgb, var(--accent-a) 40%, transparent); }
+
+/* ---------- Focus & motion ---------- */
+button, .tab, .tree-row, .rail-btn, .welcome-btn, .app-menu-item, .git-file-row, .commit-row, .script-row {
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+              border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+              transform var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent-a); outline-offset: 1px; border-radius: var(--radius-s); }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
+
+/* ---------- Titlebar ---------- */
+#titlebar {
+  height: 44px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 92%, transparent), var(--bg-1));
+  border-bottom: 1px solid var(--border-strong);
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, var(--shadow-1);
+  backdrop-filter: blur(12px);
+}
+#brand { font-size: 14px; letter-spacing: .6px; }
+.brand-logo { filter: drop-shadow(0 0 8px var(--glow)); }
+#project-name {
+  color: var(--text-dim); font-weight: 500;
+  padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--bg-2); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#project-name:empty { display: none; }
+.app-menu-item { border-radius: var(--radius-s); }
+.app-menu-item:hover { background: var(--hover-bg); }
+
+/* ---------- Buttons ---------- */
+.tbtn {
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 6px 12px;
+  font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px;
+  box-shadow: var(--shadow-1);
+}
+.tbtn:hover { background: var(--bg-3); border-color: color-mix(in srgb, var(--accent-a) 55%, var(--border-strong)); transform: translateY(-1px); }
+.tbtn:active { transform: translateY(0) scale(.98); }
+.tbtn.primary {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+  box-shadow: 0 4px 14px var(--glow), 0 1px 0 rgba(255,255,255,.25) inset;
+}
+.tbtn.primary:hover { filter: brightness(1.1); }
+.tbtn.icon-only { padding: 6px 8px; }
+
+.rail-svg { width: 20px; height: 20px; display: block; }
+.rail-svg.sm { width: 16px; height: 16px; }
+
+/* ---------- Activity rail ---------- */
+#activitybar {
+  width: 64px;
+  background: linear-gradient(180deg, var(--bg-1), var(--bg));
+  border-right: 1px solid var(--border-strong);
+  padding: 10px 6px;
+  gap: 2px;
+}
+.rail-btn {
+  border-left: none !important;
+  border-radius: var(--radius-m);
+  padding: 9px 2px 7px;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .2px;
+}
+.rail-btn:hover { background: var(--hover-bg); color: var(--text); }
+.rail-btn:hover .rail-svg { transform: translateY(-1px); }
+.rail-btn .rail-svg { transition: transform var(--dur) var(--ease); }
+.rail-btn.active {
+  color: var(--accent-a);
+  background: color-mix(in srgb, var(--accent-a) 12%, var(--bg-2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-a) 28%, transparent) inset;
+}
+.rail-btn.active::before {
+  content: ""; position: absolute; left: -6px; top: 20%; bottom: 20%; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--accent-a); box-shadow: 0 0 10px var(--glow);
+}
+.rail-badge { top: 3px; right: 6px; box-shadow: 0 0 0 2px var(--bg-1); }
+
+/* ---------- Sidebar ---------- */
+#sidebar { background: var(--bg-1); border-right: 1px solid var(--border-strong); }
+.panel-header {
+  text-transform: uppercase; letter-spacing: 1px; font-size: 10.5px; font-weight: 700;
+  color: var(--text-muted);
+}
+.icon-btn { border-radius: var(--radius-s); }
+.icon-btn:hover { background: var(--hover-bg); }
+
+.tree-row { border-radius: var(--radius-s); margin: 0 6px; }
+.tree-row:hover { background: var(--hover-bg); }
+.tree-row.active {
+  background: color-mix(in srgb, var(--accent-a) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-a);
+}
+
+/* ---------- Tabs ---------- */
+#tabbar {
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-strong);
+  min-height: 38px; padding: 0 4px; gap: 2px; align-items: flex-end;
+}
+.tab {
+  height: 34px; margin-top: 4px;
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--radius-m) var(--radius-m) 0 0;
+  padding: 0 10px 0 12px;
+}
+.tab:hover { background: var(--hover-bg); color: var(--text); }
+.tab.active {
+  background: var(--bg);
+  border-color: var(--border-strong);
+  box-shadow: 0 -6px 18px -10px var(--glow);
+}
+.tab.active::before { height: 2px; border-radius: 2px 2px 0 0; left: 8px; right: 8px; }
+.tab .close { border-radius: 50%; }
+.tab .close:hover { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
+
+#breadcrumb-bar { background: var(--bg); border-bottom: 1px solid var(--border); }
+
+/* ---------- Status bar ---------- */
+#statusbar {
+  height: 26px;
+  background: var(--bg-1);
+  color: var(--text-dim);
+  border-top: 1px solid var(--border-strong);
+  font-weight: 500;
+  position: relative;
+}
+#statusbar::before {
+  content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-a), transparent); opacity: .6;
+}
+#status-right > span { padding: 2px 8px; border-radius: var(--radius-s); }
+#status-right > span:hover { background: var(--hover-bg); color: var(--text); }
+
+/* ---------- Dropdowns, menus, toasts, modals ---------- */
+#theme-dropdown, #app-menu-dropdown, .branch-dropdown, #context-menu, .context-menu {
+  background: var(--glass) !important;
+  backdrop-filter: blur(18px) saturate(1.3);
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--radius-m) !important;
+  box-shadow: var(--shadow-2) !important;
+  padding: 5px !important;
+  animation: pop .14s var(--ease);
+}
+@keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+#update-toast, .toast, #flash-toast {
+  border-radius: var(--radius-m) !important;
+  box-shadow: var(--shadow-2) !important;
+  backdrop-filter: blur(14px);
+}
+.modal, .dialog, #quick-open, #command-palette, [class*="palette"] {
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-2);
+}
+
+/* ---------- Inputs ---------- */
+input[type="text"], input[type="search"], input[type="password"], input[type="number"], input:not([type]), textarea, select {
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent-a) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-a) 20%, transparent);
+}
+
+/* ---------- Welcome screen ---------- */
+#welcome {
+  background:
+    radial-gradient(600px 320px at 50% 30%, color-mix(in srgb, var(--accent-a) 14%, transparent), transparent 70%),
+    radial-gradient(900px 500px at 10% 110%, color-mix(in srgb, var(--accent-b) 10%, transparent), transparent 70%);
+}
+.welcome-inner { animation: rise .5s var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+.welcome-logo { filter: drop-shadow(0 8px 30px var(--glow)); animation: float 6s ease-in-out infinite; }
+@keyframes float { 50% { transform: translateY(-6px); } }
+.welcome-btn {
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-1);
+}
+.welcome-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 22px -6px var(--glow); }
+.welcome-btn.primary { background: linear-gradient(135deg, var(--accent-a), var(--accent-b)); color: #fff; border: none; }
+#recent-projects li, .recent-project {
+  border-radius: var(--radius-m);
+}
+
+/* ---------- Git / scripts / lists ---------- */
+.git-file-row:hover, .commit-row:hover, .script-row:hover, .outline-row:hover, .outdated-row:hover { background: var(--hover-bg); }
+.script-row, .outdated-row, .commit-row {
+  border-radius: var(--radius-m);
+  border: 1px solid transparent;
+}
+.script-row:hover, .outdated-row:hover, .commit-row:hover { border-color: var(--border-strong); }
+.script-run-btn {
+  border-radius: 999px; font-weight: 600;
+  background: color-mix(in srgb, var(--accent-a) 14%, var(--bg-2));
+  border: 1px solid color-mix(in srgb, var(--accent-a) 35%, transparent);
+  color: var(--accent-a); padding: 4px 12px; cursor: pointer;
+}
+.script-run-btn:hover { background: var(--accent-a); color: #fff; box-shadow: 0 4px 12px var(--glow); }
+.gbadge { border-radius: 5px; }
+.git-subtab { border-radius: 999px; }
+.git-subtab.active { background: color-mix(in srgb, var(--accent-a) 16%, transparent); color: var(--accent-a); }
+
+/* ---------- Terminal ---------- */
+#terminal-panel { border-top: 1px solid var(--border-strong); background: var(--bg-1); box-shadow: 0 -8px 24px -16px rgba(0,0,0,.6); }
+#terminal-output { line-height: 1.55; }
+
+/* ---------- Settings ---------- */
+.settings-section, .settings-card {
+  border-radius: var(--radius-l);
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  box-shadow: var(--shadow-1);
+}
+
+/* ---------- Scrollbars ---------- */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--text) 18%, transparent) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text) 16%, transparent);
+  border: 3px solid transparent; background-clip: content-box; border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent-a) 55%, transparent); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- Respect reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+.welcome-actions { flex-wrap: wrap; justify-content: center; gap: 10px; }
+.welcome-btn { white-space: nowrap; padding: 11px 18px; }
