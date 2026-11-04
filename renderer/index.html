@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; img-src 'self' data: file:; worker-src 'self' data: blob: file:;" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; font-src 'self' data:; worker-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Nexo Dev</title>
 <link rel="stylesheet" href="style.css" />
 <link rel="stylesheet" href="polish.css" />
@@ -24,7 +24,7 @@
     <div id="titlebar-right">
       <button class="tbtn" id="btn-open-folder" title="Open Folder (Ctrl+O)">Open Folder</button>
       <button class="tbtn" id="btn-new-file" title="New File (Ctrl+N)">New File</button>
-      <button class="tbtn hidden" id="btn-debug-py" title="Debug Python file (F5)">🐞 Debug</button>
+      <button class="tbtn hidden" id="btn-debug-py" title="Debug current file (F5)">🐞 Debug</button>
       <button class="tbtn hidden" id="btn-run-py" title="Run Python file (Ctrl+F5)">▶ Run Python</button>
       <button class="tbtn" id="btn-toggle-terminal" title="Toggle Terminal (Ctrl+`)">Terminal</button>
       <button class="tbtn icon-only" id="btn-toggle-split" title="Split Editor (Ctrl+\)"><svg class="rail-svg sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></button>
@@ -38,7 +38,7 @@
 
   <div id="app">
     <!-- Activity rail -->
-    <div id="activitybar">
+    <div id="activitybar" role="toolbar" aria-label="Activity bar">
       <button class="rail-btn active" id="rail-explorer" data-view="explorer" title="Explorer">
         <span class="rail-icon"><svg class="rail-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><span class="rail-label">Files</span>
       </button>
@@ -54,7 +54,7 @@
       <button class="rail-btn" id="rail-python" data-view="python" title="Python Environments">
         <span class="rail-icon"><svg class="rail-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c-4 0-4 1.5-4 3v2h4v1H6c-2 0-3 1.5-3 4s1 4 3 4h2v-3c0-1.5 1-3 3-3h4c1.5 0 2-1 2-2V6c0-2-2-3-5-3z"/><path d="M12 21c4 0 4-1.5 4-3v-2h-4v-1h6c2 0 3-1.5 3-4s-1-4-3-4h-2v3c0 1.5-1 3-3 3H9c-1.5 0-2 1-2 2v4c0 2 2 3 5 3z"/></svg></span><span class="rail-label">Python</span>
       </button>
-      <button class="rail-btn" id="rail-debug" data-view="debug" title="Run &amp; Debug (Python)">
+      <button class="rail-btn" id="rail-debug" data-view="debug" title="Run &amp; Debug">
         <span class="rail-icon"><svg class="rail-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="8" height="11" rx="4"/><path d="M12 8V5M8 12H4M20 12h-4M8 16l-3 2M16 16l3 2M9 5l3 0 3 0"/></svg></span><span class="rail-label">Debug</span>
       </button>
       <button class="rail-btn" id="rail-outline" data-view="outline" title="Outline">
@@ -310,7 +310,7 @@
           </div>
         </div>
 
-        <div id="statusbar">
+        <div id="statusbar" role="status">
           <span id="status-path">No file open</span>
           <span id="status-right">
             <span id="vim-status-bar" class="hidden"></span>
@@ -365,7 +365,10 @@
        setting window.marked, which is what we actually need. -->
   <script src="../node_modules/marked/lib/marked.umd.js"></script>
   <script src="../node_modules/dompurify/dist/purify.min.js"></script>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
-  <script src="renderer.js"></script>
+  <script src="dist/renderer.js"></script>
 </body>
 </html>

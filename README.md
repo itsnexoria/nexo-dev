@@ -4,7 +4,7 @@ A lightweight, standalone code editor and project manager for Windows, macOS, an
 
 ## Features
 
-Five views, switchable from the icon rail on the far left. Files, Search, and Git share the same tabbed editor; Sites and Settings are separate workspaces.
+Views are switchable from the icon rail on the far left. Files, Search and Git share the same tabbed editor; the developer tools and Settings are separate workspaces.
 
 ### 📁 Files — code editor & project manager
 - **Open Folder / New Project / Clone Repository** — open any local folder as a project, create a new one, or clone straight from a URL (asks where to put it, then opens it automatically once cloning finishes)
@@ -12,6 +12,7 @@ Five views, switchable from the icon rail on the far left. Files, Search, and Gi
 - **File tree** — expand/collapse folders, right-click to create, rename, delete, or reveal files/folders; drag and drop files/folders to move them, including dropping onto empty space to move something to the project root; changed files show a colored git status badge (M/A/D/etc.) right in the tree
 - **Multi-tab editor** — Monaco-powered syntax highlighting for JS/TS, Python, HTML/CSS, JSON, Markdown, and more
 - **Markdown preview** — open a `.md`/`.markdown` file (like this README) and it renders instead of showing raw text: headings, code blocks, tables, blockquotes, lists, images, the works. Hit "✏️ Edit" to switch to the raw source, or "👁 Preview" to switch back — each file remembers which mode you last had it in. External links in the preview open in your system browser.
+- **Compare files** — palette: *Compare Active File With…* (another open tab) or *Compare Active File With Clipboard* opens a side-by-side diff overlay (`Esc` closes).
 - **Split editor** (`Ctrl+\`, or the ⊞ button in the titlebar) — click the ⧉ icon on any tab to open it in a second pane side by side, pick a different open file from the dropdown above the split pane any time, and drag the divider to resize. The same file can even be open in both panes at once (two views into one file, like most editors support) — since it's the same underlying model, edits in one pane show up in the other instantly. Markdown files get their own preview toggle in the split pane too, independent of whatever mode the main pane is in.
 - **Theme picker** (titlebar button, or the full list under Settings) — four built-in themes (Nexo Dark, Nexo Light, Midnight, High Contrast) plus a **Custom** theme you design yourself: pick a background, text, and accent color in Settings and everything else — panel shades, borders, diff colors, active-row highlighting — is generated automatically to match, live as you pick. **Save named presets** ("Ocean", "Work Mode", whatever) to build a small library and switch between them with one click, instead of re-picking colors every time. Remembers your choice across restarts.
 - **Unsaved-change indicators** on tabs, with confirm-before-close/delete, plus an optional **Auto Save** (Settings → Editor)
@@ -54,30 +55,24 @@ Five views, switchable from the icon rail on the far left. Files, Search, and Gi
 - **Commit box** with a message field and commit button — stages what you've staged and commits with one click
 - Requires `git` to be installed and on your PATH (it shells out to the real `git` CLI — no bundled/native git dependency)
 
-### 🌐 Sites — uptime monitoring & SEO audits
-- **Add any site by URL** and track it in a persistent list (saved locally, survives restarts)
-- **Check Now** — pings the site, records status code, response time, and up/down state
-- **Uptime sparkline** — a rolling bar chart of the last checks with a live uptime %
-- **Background monitoring** — sites are checked automatically on their own schedule (5m–2h, configurable per site) even while you're working in a different view; a native Windows notification fires the moment a site goes down or comes back up
-- **Run SEO Audit** — fetches the page and scores it out of 100 across 10 checks:
-  title tag, meta description, H1 usage, image alt-text coverage, canonical tag,
-  mobile viewport tag, HTTPS, `robots.txt`, `sitemap.xml`, and response time —
-  each with a plain-English explanation of what passed or failed
-- **Score history trend** — a small chart of your last 20 audit scores once you've run more than one
-- **Open in browser** and **Remove site** actions
-- No external APIs or accounts needed — checks and audits run entirely from your machine using plain HTTP requests
-
 ### 💻 Terminal (`` Ctrl+` ``)
-- A bottom panel for running one-off commands (`npm install`, `git pull`, build scripts, etc.) in the project root, streaming live output
-- **ANSI color rendering** — colored output from npm, git, linters, test runners, etc. renders with real colors and bold/italic/underline instead of being stripped to plain text. Supports the standard 16-color palette, 256-color, and truecolor (`38;2;r;g;b`) escape codes.
-- Command history with ↑/↓ recall, Stop button to kill a running command, resizable by dragging its top edge
-- **Why not a full terminal?** A real interactive terminal needs `node-pty`, which requires native compilation — a common source of broken installs on end-user Windows machines without build tools set up. This gives you the 90% use case (run a command, see the output) with zero native dependencies and nothing that can fail to build. Say the word if you'd rather have the full pty-backed terminal and accept that tradeoff.
+- **Interactive PTY terminals** (xterm.js + `node-pty`) — real shells with colors, resize, multiple terminals, split side-by-side or top/bottom; the project's selected Python venv is activated automatically.
+- A command-runner panel for one-off commands (`npm install`, build scripts…) with live ANSI-colored output, ↑/↓ history and a Stop button.
+
+### 🧰 Developer tools
+- **Language servers (LSP)** — diagnostics, completion, signature help, go-to-definition, rename and quick fixes via `typescript-language-server`; other languages through a configurable server command.
+- **Debuggers** — Node.js (DAP) and Python, with breakpoints, stepping, variables and eval.
+- **Python** — venv detection/selection, lint, format, IntelliSense (jedi), notebook-style kernels, test discovery.
+- **HTTP client** — environments (`{{var}}`), cURL import/export, saved collections.
+- **Database viewer/manager** — SQLite, Postgres and MySQL; read-only by default, opt in to writes.
+- **Live Server** — serve the project locally and open it in the browser.
+- **Multi-root workspaces** (`.nexo-workspace`), **extensions** (`docs/extensions.md`), rebindable **keyboard shortcuts**, a first-run **tour**, and **file compare**.
+- **Git extras** — hunk/line staging, stash, side-by-side diff, commit graph, file history.
 
 ### ⚙️ Settings
 A proper settings page (pinned at the bottom of the icon rail) instead of scattered toggles — everything here is saved to a small local `prefs.json` and applies immediately:
 - **Appearance** — theme picker (same options as the titlebar button, including Custom), three color pickers to design your own theme, font size, minimap on/off, word wrap on/off
 - **Editor** — Auto Save toggle with a configurable delay
-- **Sites Monitor** — default check interval used whenever you add a new site (still changeable per-site afterward)
 - **Terminal** — an optional custom shell override (e.g. point it at PowerShell or Git Bash instead of the default Command Prompt)
 - **Discord Rich Presence** — optional, off by default. Shows your current project and file on your Discord profile while both apps are open. Needs your own free Discord Application Client ID (create one at [discord.com/developers/applications](https://discord.com/developers/applications), linked right from the settings row) — Nexo Dev talks to your local Discord desktop app over its IPC socket, so there's nothing else to install. Quietly retries in the background if Discord isn't running yet.
 - **About** — app info
@@ -158,7 +153,7 @@ A couple of things worth knowing:
 ## Requirements
 
 - [Node.js](https://nodejs.org) 18+ (includes npm) installed on Windows
-- Windows 10/11 for the packaged app (the build itself can also run cross-platform for dev)
+- Windows 10/11, macOS or Linux (packaged builds exist for all three)
 
 ## Setup (run these on your Windows machine)
 
@@ -189,7 +184,7 @@ Runs the unit tests (Node's built-in test runner, no extra dependencies) coverin
 - `lib/git-parse.js` — parsing `git status --porcelain` and `git blame --line-porcelain` output, and pulling owner/repo out of a GitHub remote URL
 - `lib/prefs.js` — the settings sanitizer that runs on everything coming in over `prefs:set`, making sure malformed values always fall back to a safe default instead of being written to disk as-is
 
-These are the parts of the codebase decoupled enough from Electron to unit test directly; everything else is exercised by hand since it depends on the actual Electron runtime (windows, IPC, dialogs).
+`test/*.test.js` also covers scope guarding, validation, keys, LSP, PTY, DB, extensions, tools, curl parsing, git graph/patch, workspaces and the Python IPC module. `npm run test:e2e` runs Playwright against the real Electron app (`xvfb-run -a npm run test:e2e` on Linux); `npm run test:coverage` reports unit-test coverage.
 
 ## Build a real app (.exe / .dmg / AppImage)
 
@@ -231,7 +226,7 @@ nexo-dev/
   renderer/
     index.html       App shell (activity rail, sidebar panels, tabs, editor, welcome screens)
     style.css         Dark theme, Nexo-branded red/chrome accent
-    renderer.js        All UI logic: file tree, tabs, Monaco wiring, search, git panel, sites panel, modals
+    dist/renderer.js   Generated bundle (from src/ via scripts/build.js) — do not edit
     splash.html        Startup splash screen
     icons/             App icon (.ico) + logo PNGs used throughout the UI
   build/
@@ -258,13 +253,12 @@ nexo-dev/
 
 Already wired up — `renderer/icons/icon.ico` (multi-resolution, generated from your logo) is referenced in `package.json` under `build.win.icon` and used for the window/taskbar icon too. Replace that file with a new `.ico` any time you want to update it.
 
-## Ideas for v16
+## Roadmap
 
-- Full pty-backed interactive terminal (via `node-pty`) if you want to accept the native-build tradeoff
-- Multi-window editing
-- Exporting/importing theme presets as a shareable file
-- Git stash support, blame annotations, remote management from the UI
-- SSL certificate expiry checks and exportable reports in Sites Monitor
-- Generic file-vs-file compare (not just git diffs)
+See [ROADMAP.md](ROADMAP.md).
 
-Just say the word and I'll build any of these next.
+## Development
+
+- `npm install` (also builds), `npm start` (builds then launches), `npm run watch` (rebuild on change)
+- Renderer source lives in `src/` (TypeScript, bundled in `src/order.json` order into `renderer/dist/renderer.js`); `npm run typecheck` runs `tsc`. All renderer files are type-checked (`strict`, including `strictNullChecks`) except `src/features/git-extra.ts`, which reassigns legacy functions on purpose and keeps `@ts-nocheck`.
+- `npm test` — unit tests; `npm run test:e2e` — Playwright (Electron) end-to-end tests

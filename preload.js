@@ -1,10 +1,20 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+// Files dragged in from the OS are the one way the user grants new filesystem scope from
+// inside the window. Only genuine (isTrusted) drop events count, and the path comes from
+// Electron's webUtils, never from page-supplied strings.
+window.addEventListener('drop', (e) => {
+  if (!e.isTrusted || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  const paths = Array.from(e.dataTransfer.files).map((f) => { try { return webUtils.getPathForFile(f); } catch { return ''; } }).filter(Boolean);
+  if (paths.length) ipcRenderer.invoke('scope:grant-drop', paths);
+}, true);
 
 contextBridge.exposeInMainWorld('nexo', {
   // dialogs
   openFolder: () => ipcRenderer.invoke('dialog:open-folder'),
   newProject: () => ipcRenderer.invoke('dialog:new-project'),
   pickFolder: (title) => ipcRenderer.invoke('dialog:pick-folder', title),
+  pickFile: (title, filters) => ipcRenderer.invoke('dialog:pick-file', title, filters),
   cloneRepo: (url, destParentDir) => ipcRenderer.invoke('git:clone', url, destParentDir),
   saveAsDialog: (defaultName) => ipcRenderer.invoke('dialog:save-as', defaultName),
   revealInFolder: (targetPath) => ipcRenderer.invoke('shell:reveal', targetPath),
@@ -130,6 +140,83 @@ contextBridge.exposeInMainWorld('nexo', {
   onUpdateProgress: (callback) => ipcRenderer.on('update:progress', (evt, percent) => callback(percent)),
   onUpdateDownloaded: (callback) => ipcRenderer.on('update:downloaded', () => callback()),
   onUpdateError: (callback) => ipcRenderer.on('update:error', (evt, message) => callback(message)),
+
+  // live server / http client / database viewer
+  liveStart: (root, port) => ipcRenderer.invoke('live:start', root, port),
+  liveStop: () => ipcRenderer.invoke('live:stop'),
+  liveStatus: () => ipcRenderer.invoke('live:status'),
+  httpSend: (req, vars) => ipcRenderer.invoke('http:send', req, vars),
+  httpStoreLoad: () => ipcRenderer.invoke('http:store-load'),
+  httpStoreSave: (doc) => ipcRenderer.invoke('http:store-save', doc),
+  httpParseCurl: (text) => ipcRenderer.invoke('http:parse-curl', text),
+  httpToCurl: (req, vars) => ipcRenderer.invoke('http:to-curl', req, vars),
+  dbPick: () => ipcRenderer.invoke('db:pick'),
+  dbTables: (file) => ipcRenderer.invoke('db:tables', file),
+  dbSchema: (file, table) => ipcRenderer.invoke('db:schema', file, table),
+  dbBrowse: (file, table, limit, offset) => ipcRenderer.invoke('db:browse', file, table, limit, offset),
+  dbQuery: (file, sql) => ipcRenderer.invoke('db:query', file, sql),
+
+  // interactive terminal (PTY)
+  ptyAvailable: () => ipcRenderer.invoke('pty:available'),
+  ptySpawn: (opts) => ipcRenderer.invoke('pty:spawn', opts),
+  ptyWrite: (id, data) => ipcRenderer.invoke('pty:write', id, data),
+  ptyResize: (id, cols, rows) => ipcRenderer.invoke('pty:resize', id, cols, rows),
+  ptyKill: (id) => ipcRenderer.invoke('pty:kill', id),
+  onPtyData: (cb) => ipcRenderer.on('pty:data', (evt, id, data) => cb(id, data)),
+  onPtyExit: (cb) => ipcRenderer.on('pty:exit', (evt, id, code) => cb(id, code)),
+
+  // language servers
+  lspStart: (lang, root) => ipcRenderer.invoke('lsp:start', lang, root),
+  lspStatus: (root) => ipcRenderer.invoke('lsp:status', root),
+  extList: () => ipcRenderer.invoke('ext:list'),
+  extSetEnabled: (id, on) => ipcRenderer.invoke('ext:set-enabled', id, on),
+  extOpenFolder: () => ipcRenderer.invoke('ext:open-folder'),
+  lspSend: (id, msg) => ipcRenderer.invoke('lsp:send', id, msg),
+  lspStop: (id) => ipcRenderer.invoke('lsp:stop', id),
+  onLspMessage: (cb) => ipcRenderer.on('lsp:message', (evt, id, msg) => cb(id, msg)),
+  onLspExit: (cb) => ipcRenderer.on('lsp:exit', (evt, id, code, error) => cb(id, code, error)),
+
+  // Node/TypeScript debugger (CDP)
+  njsStart: (projectRoot, file, bps) => ipcRenderer.invoke('njs:start', projectRoot, file, bps),
+  njsControl: (cmd) => ipcRenderer.invoke('njs:control', cmd),
+  njsStop: () => ipcRenderer.invoke('njs:stop'),
+  njsWrite: (text) => ipcRenderer.invoke('njs:write', text),
+  njsSetBreakpoints: (file, lines) => ipcRenderer.invoke('njs:set-breakpoints', file, lines),
+  njsFrameVars: (frameId) => ipcRenderer.invoke('njs:frame-vars', frameId),
+  njsEval: (expr, frameId) => ipcRenderer.invoke('njs:eval', expr, frameId),
+  onNjsEvent: (cb) => ipcRenderer.on('njs:event', (_e, name, payload) => cb(name, payload)),
+
+
+  // database manager (sqlite / postgres / mysql)
+  dbcList: () => ipcRenderer.invoke('dbc:list'),
+  dbcSave: (profile, password) => ipcRenderer.invoke('dbc:save', profile, password),
+  dbcDelete: (id) => ipcRenderer.invoke('dbc:delete', id),
+  dbcConnect: (id) => ipcRenderer.invoke('dbc:connect', id),
+  dbcConnectFile: (file, allowWrites) => ipcRenderer.invoke('dbc:connect-file', file, allowWrites),
+  dbcDisconnect: (connId) => ipcRenderer.invoke('dbc:disconnect', connId),
+  dbcSetWrites: (connId, allow) => ipcRenderer.invoke('dbc:set-writes', connId, allow),
+  dbcTables: (connId) => ipcRenderer.invoke('dbc:tables', connId),
+  dbcSchema: (connId, table) => ipcRenderer.invoke('dbc:schema', connId, table),
+  dbcBrowse: (connId, table, limit, offset) => ipcRenderer.invoke('dbc:browse', connId, table, limit, offset),
+  dbcQuery: (connId, sql) => ipcRenderer.invoke('dbc:query', connId, sql),
+  dbcUpdate: (connId, edit) => ipcRenderer.invoke('dbc:update', connId, edit),
+  dbcExportCsv: (connId, src) => ipcRenderer.invoke('dbc:export-csv', connId, src),
+  dbcSaveSqlite: (connId) => ipcRenderer.invoke('dbc:save-sqlite', connId),
+
+  // git extras: hunks, stash, graph
+  gitHunks: (root, rel, staged) => ipcRenderer.invoke('git:hunks', root, rel, staged),
+  gitApplySelection: (root, rel, mode, selection) => ipcRenderer.invoke('git:apply-selection', root, rel, mode, selection),
+  gitFileVersions: (root, rel, staged) => ipcRenderer.invoke('git:file-versions', root, rel, staged),
+  gitCommitVersions: (root, hash, rel) => ipcRenderer.invoke('git:commit-versions', root, hash, rel),
+  gitCommitFiles: (root, hash) => ipcRenderer.invoke('git:commit-files', root, hash),
+  gitStashList: (root) => ipcRenderer.invoke('git:stash-list', root),
+  gitStashPush: (root, message, includeUntracked) => ipcRenderer.invoke('git:stash-push', root, message, includeUntracked),
+  gitStashApply: (root, i) => ipcRenderer.invoke('git:stash-apply', root, i),
+  gitStashPop: (root, i) => ipcRenderer.invoke('git:stash-pop', root, i),
+  gitStashDrop: (root, i) => ipcRenderer.invoke('git:stash-drop', root, i),
+  gitStashShow: (root, i) => ipcRenderer.invoke('git:stash-show', root, i),
+  gitGraph: (root, limit) => ipcRenderer.invoke('git:graph', root, limit),
+  gitFileHistory: (root, rel) => ipcRenderer.invoke('git:file-history', root, rel),
 
   // menu events
   onMenu: (channel, callback) => {

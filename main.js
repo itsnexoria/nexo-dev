@@ -6,14 +6,41 @@ const { execFile, spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const sodium = require('libsodium-wrappers');
 const { Client: DiscordRPCClient } = require('@xhayper/discord-rpc');
+const { Scope, installGuard } = require('./lib/scope');
+const workspaceLib = require('./lib/workspace');
+
+// ---------- Filesystem scope + IPC guard ----------
+// The renderer may only touch folders the main process saw the user choose (see lib/scope.js).
+const scope = new Scope({ readOnlyRoots: [path.join(__dirname, 'node_modules')] });
+if (process.env.NEXO_E2E) scope.addRoot(require('os').tmpdir()); // e2e tests create projects in the temp dir
+function grantPath(p) {
+  try {
+    if (typeof p !== 'string' || !p) return;
+    if (fs.statSync(p).isDirectory()) scope.addRoot(p); else scope.addRoot(path.dirname(p));
+  } catch { /* nonexistent: nothing to grant */ }
+}
+installGuard(ipcMain, {
+  scope,
+  isTrustedSender: (evt) => !!mainWindow && !mainWindow.isDestroyed() && evt.sender === mainWindow.webContents
+    && /^file:\/\//i.test(evt.senderFrame ? evt.senderFrame.url : ''),
+});
+ipcMain.handle('scope:grant-drop', (evt, paths) => { (Array.isArray(paths) ? paths.slice(0, 50) : []).forEach(grantPath); return { ok: true }; });
 
 // Safety net: log anything that slips through try/catch instead of letting
 // the process die silently or dump a raw stack to a terminal the user isn't
 // looking at. We still let Electron's default crash-reporter/dialog behavior
 // happen for uncaughtException — this only guarantees it gets logged first.
-process.on('uncaughtException', (err) => {
-  console.error('[uncaught exception]', err);
-});
+function logCrash(kind, err) {
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'main.log');
+    try { if (fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, file + '.old'); } catch { /* no log yet */ }
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${kind}: ${err && err.stack ? err.stack : String(err)}\n`);
+  } catch { /* logging must never throw */ }
+}
+process.on('uncaughtException', (err) => { console.error('[uncaught exception]', err); logCrash('uncaughtException', err); });
+process.on('unhandledRejection', (err) => { console.error('[unhandled rejection]', err); logCrash('unhandledRejection', err); });
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandled rejection]', reason);
 });
@@ -55,7 +82,7 @@ app.on('second-instance', (event, argv) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
-    if (p) mainWindow.webContents.send('open-path', p);
+    if (p) { grantPath(p); mainWindow.webContents.send('open-path', p); }
   }
 });
 
@@ -80,6 +107,18 @@ const { parsePorcelainStatus, parseBlamePorcelain, parseGithubOwnerRepo } = requ
 function runGit(args, cwd, opts = {}) {
   return new Promise((resolve) => {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    // Keep the GitHub token out of argv (visible in process listings): move our
+    // `-c http.<url>.extraheader=...` pair into GIT_CONFIG_* environment variables.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-c' && args[i + 1].startsWith('http.https://github.com/.extraheader=')) {
+        const [k, ...v] = args[i + 1].split('=');
+        const n = parseInt(env.GIT_CONFIG_COUNT || '0', 10) || 0;
+        env[`GIT_CONFIG_KEY_${n}`] = k; env[`GIT_CONFIG_VALUE_${n}`] = v.join('=');
+        env.GIT_CONFIG_COUNT = String(n + 1);
+        args = [...args.slice(0, i), ...args.slice(i + 2)];
+        i--;
+      }
+    }
     if (opts.authSensitive) {
       // GIT_TERMINAL_PROMPT only suppresses git's own text-based prompt —
       // it does nothing to stop a GUI credential helper (e.g. Windows' Git
@@ -106,21 +145,7 @@ function runGit(args, cwd, opts = {}) {
   });
 }
 
-// ---------- Input validation helpers ----------
-// Names from the renderer (new file, rename) must be a single path segment,
-// otherwise "../../x" escapes the target folder.
-function isSafeName(name) {
-  return typeof name === 'string' && name.trim() !== '' && name !== '.' && name !== '..' && !/[\\/\0]/.test(name);
-}
-// Refs/hashes/URLs are passed as git arguments; a leading '-' would be parsed
-// as an option (e.g. --upload-pack=<cmd> on clone => command execution).
-function isSafeGitRef(ref) {
-  return typeof ref === 'string' && ref.trim() !== '' && !ref.startsWith('-') && !/[\0\s]/.test(ref);
-}
-const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
-function isSafeExternalUrl(url) {
-  try { return ALLOWED_EXTERNAL_PROTOCOLS.has(new URL(String(url)).protocol); } catch { return false; }
-}
+const { isSafeName, isSafeGitRef, isSafeExternalUrl } = require('./lib/validate');
 
 async function getGitRoot(startPath) {
   const res = await runGit(['rev-parse', '--show-toplevel'], startPath);
@@ -149,6 +174,7 @@ function writeRecent(list) {
 }
 
 function addRecent(folderPath) {
+  scope.addRoot(folderPath);
   let list = readRecent().filter((p) => p !== folderPath);
   list.unshift(folderPath);
   list = list.slice(0, 10);
@@ -401,7 +427,7 @@ function createSplash() {
     backgroundColor: '#050505',
     icon: APP_ICON,
     skipTaskbar: false,
-    webPreferences: { contextIsolation: true },
+    webPreferences: { contextIsolation: true, sandbox: true },
   });
   splashWindow.loadFile(path.join(__dirname, 'renderer', 'splash.html'));
   splashWindow.on('closed', () => { splashWindow = null; });
@@ -428,10 +454,12 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
     },
   });
 
+  mainWindow.webContents.on('render-process-gone', (e, details) => logCrash('render-process-gone', JSON.stringify(details)));
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // The renderer must never navigate away or spawn windows: external links go
   // through the validated shell:open-external handler only.
@@ -480,11 +508,11 @@ function buildMenu() {
     {
       label: 'File',
       submenu: [
-        { label: 'Open Folder…', accelerator: 'CmdOrCtrl+O', click: () => mainWindow.webContents.send('menu:open-folder') },
-        { label: 'New File', accelerator: 'CmdOrCtrl+N', click: () => mainWindow.webContents.send('menu:new-file') },
+        { label: 'Open Folder…', accelerator: 'CmdOrCtrl+O', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:open-folder') },
+        { label: 'New File', accelerator: 'CmdOrCtrl+N', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:new-file') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => mainWindow.webContents.send('menu:save') },
-        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => mainWindow.webContents.send('menu:save-as') },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:save') },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:save-as') },
         { type: 'separator' },
         { role: 'quit' },
       ],
@@ -494,16 +522,16 @@ function buildMenu() {
       submenu: [
         { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }, { type: 'separator' },
-        { label: 'Find in Files', accelerator: 'CmdOrCtrl+Shift+F', click: () => mainWindow.webContents.send('menu:show-search') },
-        { label: 'Source Control', accelerator: 'CmdOrCtrl+Shift+G', click: () => mainWindow.webContents.send('menu:show-git') },
+        { label: 'Find in Files', accelerator: 'CmdOrCtrl+Shift+F', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:show-search') },
+        { label: 'Source Control', accelerator: 'CmdOrCtrl+Shift+G', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:show-git') },
       ],
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+B', click: () => mainWindow.webContents.send('menu:toggle-sidebar') },
-        { label: 'Toggle Terminal', accelerator: 'CmdOrCtrl+`', click: () => mainWindow.webContents.send('menu:toggle-terminal') },
-        { label: 'Toggle Split Editor', accelerator: 'CmdOrCtrl+\\', click: () => mainWindow.webContents.send('menu:toggle-split') },
+        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+B', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:toggle-sidebar') },
+        { label: 'Toggle Terminal', accelerator: 'CmdOrCtrl+`', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:toggle-terminal') },
+        { label: 'Toggle Split Editor', accelerator: 'CmdOrCtrl+\\', registerAccelerator: false, click: () => mainWindow.webContents.send('menu:toggle-split') },
         { label: 'Toggle Zen Mode', accelerator: 'CmdOrCtrl+K Z', click: () => mainWindow.webContents.send('menu:toggle-zen') },
         { role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' },
         { role: 'togglefullscreen' },
@@ -570,7 +598,8 @@ app.whenReady().then(() => {
   createSplash();
   createWindow();
   const initialPath = extractPathFromArgv(process.argv);
-  if (initialPath) pendingOpenPath = initialPath;
+  if (initialPath) { pendingOpenPath = initialPath; grantPath(initialPath); }
+  for (const r of readRecent()) scope.addRoot(r);
 
   // Check once, a bit after launch — not immediately, so it doesn't compete
   // with everything else that's loading on startup.
@@ -601,11 +630,11 @@ const runningProcs = new Map(); // id -> ChildProcess
 function pythonEnvFor(cwd) {
   const env = { ...process.env, PYTHONUNBUFFERED: '1' };
   try {
-    const dir = typeof resolveVenvDir === 'function' ? resolveVenvDir(cwd) : null;
+    const dir = pythonIpc.resolveVenvDir(cwd);
     if (!dir) return env;
     const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'PATH';
     env.VIRTUAL_ENV = path.join(cwd, dir);
-    env[pathKey] = venvBinDir(cwd, dir) + path.delimiter + (env[pathKey] || '');
+    env[pathKey] = pythonIpc.venvBinDir(cwd, dir) + path.delimiter + (env[pathKey] || '');
     delete env.PYTHONHOME;
   } catch { /* fall back to plain env */ }
   return env;
@@ -661,10 +690,57 @@ ipcMain.handle('term:kill', (evt, id) => {
   }
 });
 
+// ---------- Interactive PTY terminals (xterm.js front-end) ----------
+const { PtyManager } = require('./lib/pty');
+const ptyManager = new PtyManager({
+  onData: (id, data) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:data', id, data); },
+  onExit: (id, code) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:exit', id, code); },
+});
+ipcMain.handle('pty:available', () => ({ available: ptyManager.available, error: ptyManager.error }));
+ipcMain.handle('pty:spawn', (evt, opts = {}) => {
+  try {
+    const cwd = typeof opts.cwd === 'string' ? opts.cwd : undefined;
+    return { ok: true, ...ptyManager.spawn({ cwd, cols: opts.cols, rows: opts.rows, env: pythonEnvFor(cwd || process.cwd()), shell: readPrefs().customShell }) };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+ipcMain.handle('pty:write', (evt, id, data) => ({ ok: ptyManager.write(id, data) }));
+ipcMain.handle('pty:resize', (evt, id, cols, rows) => { ptyManager.resize(id, cols, rows); return { ok: true }; });
+ipcMain.handle('pty:kill', (evt, id) => { ptyManager.kill(id); return { ok: true }; });
+
+// ---------- Language servers (LSP) ----------
+const { LspManager } = require('./lib/lsp');
+const lspManager = new LspManager({
+  getUserServers: () => readPrefs().lspServers || {},
+  onMessage: (id, msg) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lsp:message', id, msg); },
+  onExit: (id, code, error) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lsp:exit', id, code, error); },
+});
+ipcMain.handle('lsp:start', (evt, lang, root) => {
+  if (readPrefs().lspEnabled === false) return { ok: false, error: 'Language servers are disabled in Settings.', code: 'disabled' };
+  if (typeof lang !== 'string' || typeof root !== 'string' || !fs.existsSync(root)) return { ok: false, error: 'Bad request.' };
+  return lspManager.start(lang, root);
+});
+const extDir = () => path.join(app.getPath('userData'), 'extensions');
+const extStatePath = () => path.join(app.getPath('userData'), 'extensions-state.json');
+const readExtDisabled = () => { try { const d = JSON.parse(fs.readFileSync(extStatePath(), 'utf8')).disabled; return Array.isArray(d) ? d.filter((x) => typeof x === 'string') : []; } catch { return []; } };
+ipcMain.handle('ext:list', () => { fs.mkdirSync(extDir(), { recursive: true }); return require('./lib/extensions').scan(extDir(), readExtDisabled()).map(({ dir, ...rest }) => rest); });
+ipcMain.handle('ext:set-enabled', (evt, id, enabled) => {
+  if (typeof id !== 'string' || !require('./lib/extensions').ID_RE.test(id)) return { ok: false };
+  const set = new Set(readExtDisabled()); if (enabled) set.delete(id); else set.add(id);
+  fs.writeFileSync(extStatePath(), JSON.stringify({ disabled: [...set] })); return { ok: true };
+});
+ipcMain.handle('ext:open-folder', () => { fs.mkdirSync(extDir(), { recursive: true }); shell.openPath(extDir()); return { ok: true, dir: extDir() }; });
+ipcMain.handle('lsp:status', (evt, root) => {
+  const { installCommand } = require('./lib/lsp-servers');
+  if (typeof root !== 'string') return { ok: false };
+  return { ok: true, rows: lspManager.statusAll(root).map((r) => ({ ...r, installCmd: installCommand(r) })) };
+});
+ipcMain.handle('lsp:send', (evt, id, msg) => ({ ok: lspManager.send(id, msg) }));
+ipcMain.handle('lsp:stop', (evt, id) => { lspManager.stop(id); return { ok: true }; });
+
 app.on('before-quit', () => {
-  for (const p of [...kernels.keys()]) killKernel(p);
-  stopIntel();
-  if (dbgSession) { try { dbgSession.stop(); } catch { /* gone */ } }
+  lspManager.stopAll();
+  ptyManager.killAll();
+  pythonIpc.shutdown();
   for (const child of runningProcs.values()) {
     try { child.kill(); } catch { /* already gone */ }
   }
@@ -705,7 +781,23 @@ ipcMain.handle('dialog:pick-folder', async (evt, title) => {
     title: title || 'Choose a folder',
   });
   if (result.canceled || !result.filePaths.length) return null;
+  scope.addRoot(result.filePaths[0]);
   return result.filePaths[0];
+});
+
+ipcMain.handle('dialog:pick-file', async (evt, title, filters) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    title: title || 'Choose a file',
+    filters: Array.isArray(filters) ? filters.slice(0, 5).map((f) => ({ name: String(f.name || ''), extensions: (f.extensions || []).map(String) })) : undefined,
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const file = result.filePaths[0];
+  scope.addFile(file);
+  if (file.endsWith(workspaceLib.WS_EXT)) {
+    try { workspaceLib.parse(file, fs.readFileSync(file, 'utf-8')).forEach((r) => scope.addRoot(r)); } catch { /* renderer reports the parse error */ }
+  }
+  return file;
 });
 
 ipcMain.handle('git:clone', async (evt, url, destParentDir) => {
@@ -731,6 +823,7 @@ ipcMain.handle('git:clone', async (evt, url, destParentDir) => {
 ipcMain.handle('dialog:save-as', async (evt, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, { defaultPath: defaultName });
   if (result.canceled || !result.filePath) return null;
+  scope.addFile(result.filePath);
   return result.filePath;
 });
 
@@ -764,8 +857,11 @@ ipcMain.handle('fs:read-dir', async (evt, dirPath) => {
     });
 });
 
+const MAX_READ_BYTES = 50 * 1024 * 1024;
 ipcMain.handle('fs:read-file', async (evt, filePath) => {
   try {
+    const size = fs.statSync(filePath).size;
+    if (size > MAX_READ_BYTES) return { ok: false, code: 'ETOOBIG', error: `File is too large to open (${(size / 1048576).toFixed(1)} MB; limit ${MAX_READ_BYTES / 1048576} MB).` };
     const content = fs.readFileSync(filePath, 'utf-8');
     return { ok: true, content };
   } catch (err) {
@@ -917,6 +1013,23 @@ ipcMain.handle('fs:move', async (evt, sourcePath, destDir) => {
     return { ok: false, error: err.code === 'EXDEV' ? "Can't move files across drives." : err.message };
   }
 });
+
+// ---------- IPC: live server / HTTP client / DB viewer ----------
+const toolsIpc = require('./lib/ipc-tools').register({ ipcMain, dialog, shell, getWindow: () => mainWindow, scope, httpStorePath: path.join(app.getPath('userData'), 'http-client.json') });
+app.on('before-quit', () => { toolsIpc.shutdown().catch(() => {}); });
+require('./lib/ipc-git-extra').register({ ipcMain });
+const dbIpc = require('./lib/ipc-db').register({
+  ipcMain, dialog, getWindow: () => mainWindow, scope,
+  storePath: path.join(app.getPath('userData'), 'db-connections.json'),
+  secrets: {
+    encrypt: (s) => { if (!safeStorage.isEncryptionAvailable()) throw new Error('OS keychain encryption is not available; cannot store a password.'); return safeStorage.encryptString(s).toString('base64'); },
+    decrypt: (b) => safeStorage.decryptString(Buffer.from(b, 'base64')),
+  },
+});
+app.on('before-quit', () => { dbIpc.shutdown().catch(() => {}); });
+
+const njsIpc = require('./lib/ipc-nodedebug').register({ ipcMain, getWindow: () => mainWindow, scope });
+app.on('before-quit', () => { njsIpc.shutdown().catch(() => {}); });
 
 // ---------- IPC: shell ----------
 ipcMain.handle('shell:open-external', (evt, url) => {
@@ -1296,383 +1409,8 @@ ipcMain.handle('npm:outdated', async (evt, projectRoot, forceRefresh = false) =>
   return result;
 });
 
-// ---------------- Python support ----------------
-const PY_VENV_DIRS = ['.venv', 'venv', 'env', '.env'];
-const pyCache = new Map(); // "root|bin" -> { result, timestamp }
-const pySelection = new Map(); // projectRoot -> selected venv dir name
-const pyMissingTools = new Set(); // "root|tool" known to be absent
+const pythonIpc = require('./lib/ipc-python').register({ ipcMain, getWindow: () => mainWindow, pythonEnvFor, findLocalEslintBin, OUTDATED_CACHE_TTL_MS });
 
-function venvBinDir(root, dir) {
-  return path.join(root, dir, process.platform === 'win32' ? 'Scripts' : 'bin');
-}
-
-function venvPython(root, dir) {
-  const p = path.join(venvBinDir(root, dir), process.platform === 'win32' ? 'python.exe' : 'python');
-  return fs.existsSync(p) ? p : null;
-}
-
-// The venv commands should run in: explicit selection, else the first one found.
-function resolveVenvDir(root) {
-  const sel = pySelection.get(root);
-  if (sel && venvPython(root, sel)) return sel;
-  return PY_VENV_DIRS.find((d) => venvPython(root, d)) || null;
-}
-
-function runPy(bin, args, cwd, timeout = 20000, input = null) {
-  return new Promise((resolve) => {
-    const child = execFile(bin, args, { cwd, timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      resolve({ err, stdout: stdout || '', stderr: stderr || '' });
-    });
-    if (input !== null && child.stdin) { child.stdin.on('error', () => {}); child.stdin.end(input); }
-  });
-}
-
-async function findSystemPython(cwd) {
-  const candidates = process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'];
-  for (const c of candidates) {
-    const r = await runPy(c, ['--version'], cwd, 5000);
-    if (!r.err) return { bin: c, version: (r.stdout || r.stderr).trim() };
-  }
-  return null;
-}
-
-function detectPyManager(root) {
-  const has = (f) => fs.existsSync(path.join(root, f));
-  let pyproject = '';
-  try { pyproject = fs.readFileSync(path.join(root, 'pyproject.toml'), 'utf8'); } catch { /* none */ }
-  if (has('uv.lock') || /\[tool\.uv\b/.test(pyproject)) return 'uv';
-  if (has('poetry.lock') || /\[tool\.poetry\b/.test(pyproject)) return 'poetry';
-  if (has('Pipfile')) return 'pipenv';
-  return 'pip';
-}
-
-async function resolveInterpreter(root) {
-  const dir = resolveVenvDir(root);
-  if (dir) return { bin: venvPython(root, dir), venv: dir };
-  const sys = await findSystemPython(root);
-  return sys ? { bin: sys.bin, venv: null } : null;
-}
-
-// pip, falling back to `uv pip` for venvs created by uv (which ship without pip).
-async function runPip(bin, pipArgs, cwd, timeout) {
-  const r = await runPy(bin, ['-m', 'pip', ...pipArgs, '--disable-pip-version-check'], cwd, timeout);
-  if (r.err && /No module named pip/i.test(r.stderr)) {
-    const u = await runPy('uv', ['pip', ...pipArgs, '--python', bin], cwd, timeout);
-    if (!u.err || u.stdout) return u;
-  }
-  return r;
-}
-
-ipcMain.handle('py:info', async (evt, projectRoot) => {
-  if (!projectRoot) return { ok: false, error: 'No project open.' };
-  const system = await findSystemPython(projectRoot);
-  const venvs = [];
-  for (const dir of PY_VENV_DIRS) {
-    const bin = venvPython(projectRoot, dir);
-    if (!bin) continue;
-    const r = await runPy(bin, ['--version'], projectRoot, 5000);
-    venvs.push({ dir, bin, version: r.err ? '' : (r.stdout || r.stderr).trim() });
-  }
-  const files = ['requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'Pipfile', 'setup.py', 'poetry.lock', 'uv.lock']
-    .filter((f) => fs.existsSync(path.join(projectRoot, f)));
-  return { ok: true, system, venvs, files, selected: resolveVenvDir(projectRoot), manager: detectPyManager(projectRoot), platform: process.platform };
-});
-
-ipcMain.handle('py:select', (evt, projectRoot, dir) => {
-  if (pySelection.get(projectRoot) !== dir) stopIntel();
-  if (projectRoot) { if (dir) pySelection.set(projectRoot, dir); else pySelection.delete(projectRoot); }
-  return { ok: true };
-});
-
-ipcMain.handle('py:resolve', async (evt, projectRoot) => {
-  if (!projectRoot) return null;
-  const it = await resolveInterpreter(projectRoot);
-  if (!it) return null;
-  const r = await runPy(it.bin, ['--version'], projectRoot, 5000);
-  return { bin: it.bin, venv: it.venv, version: r.err ? '' : (r.stdout || r.stderr).trim() };
-});
-
-ipcMain.handle('py:list', async (evt, projectRoot, pythonBin) => {
-  if (!projectRoot || !pythonBin) return { ok: false, error: 'No interpreter.' };
-  const r = await runPip(pythonBin, ['list', '--format=json'], projectRoot);
-  if (r.err && !r.stdout) return { ok: false, error: r.stderr || r.err.message };
-  try { return { ok: true, packages: JSON.parse(r.stdout) }; }
-  catch { return { ok: false, error: 'Could not parse pip list output.' }; }
-});
-
-ipcMain.handle('py:outdated', async (evt, projectRoot, pythonBin, forceRefresh = false) => {
-  if (!projectRoot || !pythonBin) return { ok: false, error: 'No interpreter.' };
-  const key = projectRoot + '|' + pythonBin;
-  const cached = pyCache.get(key);
-  if (!forceRefresh && cached && Date.now() - cached.timestamp < OUTDATED_CACHE_TTL_MS) return cached.result;
-  const r = await runPip(pythonBin, ['list', '--outdated', '--format=json'], projectRoot, 60000);
-  let result;
-  if (r.err && !r.stdout) result = { ok: false, error: r.stderr || r.err.message };
-  else {
-    try { result = { ok: true, packages: JSON.parse(r.stdout) }; }
-    catch { result = { ok: false, error: 'Could not parse pip outdated output.' }; }
-  }
-  if (result.ok) pyCache.set(key, { result, timestamp: Date.now() });
-  return result;
-});
-
-// Lint with ruff (preferred) or flake8 from the project's interpreter.
-ipcMain.handle('py:lint', async (evt, projectRoot, filePath, content) => {
-  if (!projectRoot) return { ok: false, reason: 'not-found' };
-  const it = await resolveInterpreter(projectRoot);
-  if (!it) return { ok: false, reason: 'not-found' };
-  const missing = (r) => r.err && /No module named/i.test(r.stderr);
-  if (!pyMissingTools.has(projectRoot + '|ruff')) {
-    const r = await runPy(it.bin, ['-m', 'ruff', 'check', '--output-format=json', '--no-cache', '--stdin-filename', filePath, '-'], projectRoot, 15000, content);
-    if (missing(r)) pyMissingTools.add(projectRoot + '|ruff');
-    else {
-      try {
-        const data = JSON.parse(r.stdout || '[]');
-        return { ok: true, tool: 'ruff', messages: data.map((m) => ({
-          line: m.location.row, column: m.location.column,
-          endLine: (m.end_location || m.location).row, endColumn: (m.end_location || m.location).column,
-          message: m.message, code: m.code || '', severity: m.code && /^(E9|F6|F7|F82)/.test(m.code) ? 2 : 1,
-        })) };
-      } catch { return { ok: false, reason: 'error' }; }
-    }
-  }
-  if (!pyMissingTools.has(projectRoot + '|flake8')) {
-    const r = await runPy(it.bin, ['-m', 'flake8', '--format=%(row)d:%(col)d:%(code)s:%(text)s', '--stdin-display-name', filePath, '-'], projectRoot, 15000, content);
-    if (missing(r)) pyMissingTools.add(projectRoot + '|flake8');
-    else {
-      const messages = [];
-      for (const line of r.stdout.split(/\r?\n/)) {
-        const m = line.match(/^(\d+):(\d+):(\w+):(.*)$/);
-        if (m) messages.push({ line: +m[1], column: +m[2], endLine: +m[1], endColumn: +m[2] + 1, message: m[4].trim(), code: m[3], severity: /^(E9|F)/.test(m[3]) ? 2 : 1 });
-      }
-      return { ok: true, tool: 'flake8', messages };
-    }
-  }
-  return { ok: false, reason: 'not-found' };
-});
-
-ipcMain.handle('py:format', async (evt, projectRoot, filePath, content) => {
-  if (!projectRoot) return { ok: false, reason: 'not-found' };
-  const it = await resolveInterpreter(projectRoot);
-  if (!it) return { ok: false, reason: 'not-found' };
-  const attempts = [
-    ['-m', 'ruff', 'format', '--stdin-filename', filePath, '-'],
-    ['-m', 'black', '-q', '--stdin-filename', filePath, '-'],
-  ];
-  for (const args of attempts) {
-    const r = await runPy(it.bin, args, projectRoot, 15000, content);
-    if (/No module named/i.test(r.stderr)) continue;
-    if (r.err) return { ok: false, reason: 'error', error: r.stderr };
-    return { ok: true, formatted: r.stdout };
-  }
-  return { ok: false, reason: 'not-found' };
-});
-
-// ---------------- Python IntelliSense (jedi helper process) ----------------
-const { spawn: spawnProc } = require('child_process');
-let intelProc = null; // { key, child, pending: Map, nextId, buf, dead }
-
-function stopIntel() {
-  if (intelProc) { try { intelProc.child.kill(); } catch { /* gone */ } intelProc = null; }
-}
-
-async function ensureIntel(root) {
-  const it = await resolveInterpreter(root);
-  if (!it) return null;
-  const key = root + '|' + it.bin;
-  if (intelProc && intelProc.key === key && !intelProc.dead) return intelProc;
-  stopIntel();
-  const child = spawnProc(it.bin, [path.join(__dirname, 'lib', 'nexo_jedi.py'), root], { cwd: root, env: pythonEnvFor(root), windowsHide: true });
-  const st = { key, child, pending: new Map(), nextId: 1, buf: '', dead: false, noJedi: false };
-  child.stdout.on('data', (d) => {
-    st.buf += d.toString();
-    let i;
-    while ((i = st.buf.indexOf('\n')) !== -1) {
-      const line = st.buf.slice(0, i); st.buf = st.buf.slice(i + 1);
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id === 0 && msg.error === 'no-jedi') { st.noJedi = true; continue; }
-        const p = st.pending.get(msg.id);
-        if (p) { st.pending.delete(msg.id); p(msg.result); }
-      } catch { /* ignore junk */ }
-    }
-  });
-  child.stderr.on('data', () => {});
-  child.on('close', () => { st.dead = true; for (const p of st.pending.values()) p(null); st.pending.clear(); });
-  child.on('error', () => { st.dead = true; });
-  intelProc = st;
-  return st;
-}
-
-ipcMain.handle('py:intel', async (evt, projectRoot, req) => {
-  if (!projectRoot) return { ok: false };
-  const st = await ensureIntel(projectRoot);
-  if (!st) return { ok: false, reason: 'no-python' };
-  // give the helper a moment to report a missing jedi install
-  if (st.noJedi || st.dead) return { ok: false, reason: 'no-jedi' };
-  const id = st.nextId++;
-  const result = await new Promise((resolve) => {
-    const timer = setTimeout(() => { st.pending.delete(id); resolve(null); }, 8000);
-    st.pending.set(id, (r) => { clearTimeout(timer); resolve(r); });
-    try { st.child.stdin.write(JSON.stringify({ ...req, id }) + '\n'); } catch { clearTimeout(timer); resolve(null); }
-  });
-  if (st.noJedi || st.dead) return { ok: false, reason: 'no-jedi' };
-  return { ok: true, result };
-});
-
-ipcMain.handle('py:intel-reset', () => { stopIntel(); return { ok: true }; });
-
-// ---------------- Notebook kernels ----------------
-const kernels = new Map(); // notebook path -> { child, buf, pending: Map, nextId, ready }
-
-function killKernel(nbPath) {
-  const k = kernels.get(nbPath);
-  if (!k) return;
-  kernels.delete(nbPath);
-  try { k.child.kill(); } catch { /* gone */ }
-  for (const p of k.pending.values()) p({ outputs: [{ output_type: 'error', ename: 'KernelRestarted', evalue: '', traceback: ['Kernel stopped.'] }], count: null });
-  k.pending.clear();
-}
-
-async function ensureKernel(root, nbPath) {
-  let k = kernels.get(nbPath);
-  if (k) return k;
-  const it = await resolveInterpreter(root);
-  if (!it) return null;
-  const child = spawnProc(it.bin, ['-u', path.join(__dirname, 'lib', 'nexo_kernel.py')], { cwd: root, env: pythonEnvFor(root), windowsHide: true });
-  k = { child, buf: '', pending: new Map(), nextId: 1 };
-  child.stdout.on('data', (d) => {
-    k.buf += d.toString();
-    let i;
-    while ((i = k.buf.indexOf('\n')) !== -1) {
-      const line = k.buf.slice(0, i); k.buf = k.buf.slice(i + 1);
-      const at = line.indexOf('\x01NEXO:');
-      if (at === -1) continue;
-      try {
-        const msg = JSON.parse(line.slice(at + 6));
-        const p = k.pending.get(msg.id);
-        if (p) { k.pending.delete(msg.id); p(msg); }
-      } catch { /* ignore */ }
-    }
-  });
-  child.stderr.on('data', () => {});
-  child.on('close', () => {
-    if (kernels.get(nbPath) === k) kernels.delete(nbPath);
-    for (const p of k.pending.values()) p({ outputs: [{ output_type: 'error', ename: 'KernelDied', evalue: '', traceback: ['The kernel process exited.'] }], count: null });
-    k.pending.clear();
-  });
-  child.on('error', () => {});
-  kernels.set(nbPath, k);
-  return k;
-}
-
-ipcMain.handle('nb:run', async (evt, projectRoot, nbPath, code) => {
-  const k = await ensureKernel(projectRoot, nbPath);
-  if (!k) return { ok: false, error: 'Python not found.' };
-  const id = k.nextId++;
-  const res = await new Promise((resolve) => {
-    k.pending.set(id, resolve);
-    try { k.child.stdin.write(JSON.stringify({ id, code }) + '\n'); } catch { resolve(null); }
-  });
-  if (!res) return { ok: false, error: 'Could not reach the kernel.' };
-  return { ok: true, outputs: res.outputs, count: res.count };
-});
-ipcMain.handle('nb:restart', (evt, nbPath) => { killKernel(nbPath); return { ok: true }; });
-
-ipcMain.handle('py:lint-reset', (evt, projectRoot) => {
-  for (const k of [...pyMissingTools]) if (k.startsWith(projectRoot + '|')) pyMissingTools.delete(k);
-  return { ok: true };
-});
-
-// Collect pytest tests: returns node ids like tests/test_a.py::test_x
-ipcMain.handle('py:tests', async (evt, projectRoot) => {
-  if (!projectRoot) return { ok: false, error: 'No project open.' };
-  const it = await resolveInterpreter(projectRoot);
-  if (!it) return { ok: false, error: 'No Python interpreter found.' };
-  const r = await runPy(it.bin, ['-m', 'pytest', '--collect-only', '-q', '--no-header', '-p', 'no:cacheprovider'], projectRoot, 30000);
-  if (/No module named pytest/i.test(r.stderr + r.stdout)) return { ok: false, reason: 'no-pytest' };
-  const tests = r.stdout.split(/\r?\n/).filter((l) => l.includes('::') && !/^\s/.test(l) && !/^(ERROR|FAILED)/.test(l));
-  if (!tests.length && r.err && r.err.code !== 5) return { ok: false, error: (r.stdout + r.stderr).trim().slice(0, 600) || r.err.message };
-  return { ok: true, tests };
-});
-
-// ---------------- Python debugger ----------------
-const { PyDebugSession } = require('./lib/pydebug');
-let dbgSession = null;
-
-function dbgSend(name, payload) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('dbg:event', name, payload);
-}
-
-ipcMain.handle('dbg:start', async (evt, projectRoot, file, breakpoints) => {
-  if (dbgSession) { try { dbgSession.stop(); } catch { /* gone */ } dbgSession = null; }
-  const it = await resolveInterpreter(projectRoot);
-  if (!it) return { ok: false, error: 'Python not found.' };
-  const session = new PyDebugSession({
-    python: it.bin, file, cwd: projectRoot, env: pythonEnvFor(projectRoot), breakpoints,
-    onEvent: (name, payload) => { if (dbgSession === session || name === 'terminated') dbgSend(name, payload); },
-  });
-  dbgSession = session;
-  try {
-    await session.start();
-    return { ok: true };
-  } catch (err) {
-    dbgSession = null;
-    session.stop();
-    return { ok: false, reason: err.message === 'no-debugpy' ? 'no-debugpy' : 'error', error: err.message };
-  }
-});
-ipcMain.handle('dbg:control', async (evt, cmd) => { if (dbgSession) { try { await dbgSession.control(cmd); } catch { /* ignore */ } } return { ok: true }; });
-ipcMain.handle('dbg:stop', () => { if (dbgSession) { dbgSession.stop(); dbgSession = null; } return { ok: true }; });
-ipcMain.handle('dbg:write', (evt, text) => { if (dbgSession) dbgSession.write(text); return { ok: true }; });
-ipcMain.handle('dbg:set-breakpoints', async (evt, file, lines) => { if (dbgSession) { try { await dbgSession.setBreakpoints(file, lines); } catch { /* ignore */ } } return { ok: true }; });
-ipcMain.handle('dbg:frame-vars', async (evt, frameId) => {
-  if (!dbgSession) return { ok: false };
-  try { return { ok: true, variables: await dbgSession.frameVariables(frameId) }; } catch (err) { return { ok: false, error: err.message }; }
-});
-ipcMain.handle('dbg:eval', async (evt, expr, frameId) => {
-  if (!dbgSession) return { ok: false, error: 'No active debug session.' };
-  try { return { ok: true, result: await dbgSession.evaluate(expr, frameId) }; } catch (err) { return { ok: false, error: err.message }; }
-});
-
-ipcMain.handle('eslint:lint', async (evt, projectRoot, filePath, content) => {
-  if (!projectRoot) return { ok: false, reason: 'not-found' };
-  const bin = findLocalEslintBin(projectRoot);
-  if (!bin) return { ok: false, reason: 'not-found' };
-  const useStdin = typeof content === 'string';
-  const args = useStdin
-    ? ['--format', 'json', '--no-color', '--stdin', '--stdin-filename', filePath]
-    : ['--format', 'json', '--no-color', filePath];
-  return new Promise((resolve) => {
-    const child = execFile(bin, args, { cwd: projectRoot, timeout: 15000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      // ESLint exits with code 1 when it finds lint problems — that's not a
-      // real failure, stdout still has valid JSON either way.
-      if (!stdout) { resolve({ ok: false, reason: 'error', error: err ? err.message : 'No output from ESLint.' }); return; }
-      try {
-        const results = JSON.parse(stdout);
-        const resolved = path.resolve(filePath);
-        const fileResult = results.find((r) => path.resolve(r.filePath) === resolved) || results[0];
-        const messages = fileResult ? fileResult.messages : [];
-        resolve({
-          ok: true,
-          messages: messages
-            .filter((m) => Number.isFinite(m.line)) // fatal parse errors sometimes omit position info
-            .map((m) => ({
-              line: m.line, column: m.column || 1,
-              endLine: m.endLine || m.line, endColumn: m.endColumn || (m.column || 1) + 1,
-              severity: m.severity, message: m.message, ruleId: m.ruleId || null,
-            })),
-        });
-      } catch {
-        resolve({ ok: false, reason: 'error', error: 'Could not parse ESLint output.' });
-      }
-    });
-    if (useStdin) {
-      child.stdin.write(content);
-      child.stdin.end();
-    }
-  });
-});
 
 ipcMain.handle('git:status', async (evt, projectRoot) => {
   const root = await getGitRoot(projectRoot);

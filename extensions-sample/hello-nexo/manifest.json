@@ -1,0 +1,10 @@
+{
+  "id": "hello-nexo",
+  "name": "Hello Nexo",
+  "version": "1.0.0",
+  "description": "Sample: a command, a status bar item, a snippet and a theme.",
+  "main": "main.js",
+  "commands": [{ "id": "hello", "title": "Say Hello" }, { "id": "stamp", "title": "Insert Timestamp" }],
+  "snippets": [{ "language": "javascript", "prefix": "nlog", "body": "console.log('${1:msg}', ${2:value});", "description": "console.log" }],
+  "themes": [{ "id": "midnight", "name": "Midnight", "base": "vs-dark", "colors": { "editor.background": "#0b1020" }, "rules": [{ "token": "comment", "foreground": "#5c6a8a" }] }]
+}
