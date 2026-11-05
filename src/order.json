@@ -1,5 +1,7 @@
 [
  "../lib/keys.js",
+ "../lib/theme-presets.js",
+ "../lib/emmet-suggest.js",
  "legacy/state.ts",
  "legacy/editorconfig.ts",
  "legacy/monaco.ts",
@@ -22,12 +24,16 @@
  "features/tools.ts",
  "features/workspace.ts",
  "features/pty-terminal.ts",
+ "features/remote.ts",
  "features/lsp.ts",
  "features/node-debug.ts",
  "features/git-extra.ts",
  "features/keybindings.ts",
  "features/extensions.ts",
  "features/compare.ts",
+ "features/theme-presets.ts",
+ "features/editor-actions.ts",
+ "features/editor-extras.ts",
  "features/a11y.ts",
  "features/tour.ts"
 ]

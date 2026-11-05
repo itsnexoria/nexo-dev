@@ -7,7 +7,7 @@ declare function require(deps: string[] | string, cb?: (...a: any[]) => void): a
 declare namespace require { function config(c: any): void }
 interface Window { nexo: NexoApi; }
 interface Window { nexoA11y?: any; }
-interface Window { NexoKeys: any; nexoKeybindings: any; nexoExtensions: any; nexoWorkspace: any; removeWorkspaceRoot: any; monaco: any; __ptyReady: any; FitAddon: any; Terminal: any; }
+interface Window { NexoKeys: any; NexoThemePresets: any; NexoEmmet: any; NexoEmmetSuggest: any; nexoBookmarks: any; nexoThemePresets: any; nexoKeybindings: any; nexoExtensions: any; nexoWorkspace: any; removeWorkspaceRoot: any; monaco: any; __ptyReady: any; FitAddon: any; Terminal: any; }
 declare const Terminal: any;
 declare const FitAddon: any;
 declare const module: any;

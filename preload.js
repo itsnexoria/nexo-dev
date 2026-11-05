@@ -167,6 +167,9 @@ contextBridge.exposeInMainWorld('nexo', {
 
   // language servers
   lspStart: (lang, root) => ipcRenderer.invoke('lsp:start', lang, root),
+  remoteSshHosts: () => ipcRenderer.invoke('remote:ssh-hosts'),
+  remoteDockerList: () => ipcRenderer.invoke('remote:docker-list'),
+  lspInstall: (id) => ipcRenderer.invoke('lsp:install', id),
   lspStatus: (root) => ipcRenderer.invoke('lsp:status', root),
   extList: () => ipcRenderer.invoke('ext:list'),
   extSetEnabled: (id, on) => ipcRenderer.invoke('ext:set-enabled', id, on),

@@ -1,13 +1,10 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const https = require('https');
 const { execFile, spawn } = require('child_process');
-const { autoUpdater } = require('electron-updater');
-const sodium = require('libsodium-wrappers');
-const { Client: DiscordRPCClient } = require('@xhayper/discord-rpc');
 const { Scope, installGuard } = require('./lib/scope');
 const workspaceLib = require('./lib/workspace');
+const { isSafeName, isSafeExternalUrl } = require('./lib/validate');
 
 // ---------- Filesystem scope + IPC guard ----------
 // The renderer may only touch folders the main process saw the user choose (see lib/scope.js).
@@ -99,199 +96,9 @@ const {
   walkForFileList,
 } = require('./lib/search');
 
-// ---------- Git integration (shells out to the system `git`, no native deps) ----------
-// Output parsers (status/blame porcelain, remote URL parsing) live in
-// lib/git-parse.js (kept dependency-free from Electron so they're
-// unit-testable independent of a real git executable).
-const { parsePorcelainStatus, parseBlamePorcelain, parseGithubOwnerRepo } = require('./lib/git-parse');
-function runGit(args, cwd, opts = {}) {
-  return new Promise((resolve) => {
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    // Keep the GitHub token out of argv (visible in process listings): move our
-    // `-c http.<url>.extraheader=...` pair into GIT_CONFIG_* environment variables.
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] === '-c' && args[i + 1].startsWith('http.https://github.com/.extraheader=')) {
-        const [k, ...v] = args[i + 1].split('=');
-        const n = parseInt(env.GIT_CONFIG_COUNT || '0', 10) || 0;
-        env[`GIT_CONFIG_KEY_${n}`] = k; env[`GIT_CONFIG_VALUE_${n}`] = v.join('=');
-        env.GIT_CONFIG_COUNT = String(n + 1);
-        args = [...args.slice(0, i), ...args.slice(i + 2)];
-        i--;
-      }
-    }
-    if (opts.authSensitive) {
-      // GIT_TERMINAL_PROMPT only suppresses git's own text-based prompt —
-      // it does nothing to stop a GUI credential helper (e.g. Windows' Git
-      // Credential Manager) from popping up its own window, which is easy
-      // to miss behind the app and looks exactly like a silent hang.
-      // GIT_ASKPASS/SSH_ASKPASS point at a command that returns nothing,
-      // so any credential request fails immediately instead of waiting on
-      // a prompt nobody's going to see. Cached credentials (a helper that
-      // already has a valid token) are unaffected — this only kicks in
-      // when git would otherwise need to *ask*.
-      const noPrompt = process.platform === 'win32' ? 'cmd.exe /c exit 1' : 'true';
-      env.GIT_ASKPASS = noPrompt;
-      env.SSH_ASKPASS = noPrompt;
-      env.SSH_ASKPASS_REQUIRE = 'force';
-    }
-    execFile('git', args, {
-      cwd,
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: opts.timeoutMs || 0, // 0 = no timeout
-      env,
-    }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err ? err.code : 0, stdout: stdout || '', stderr: stderr || (err ? err.message : '') });
-    });
-  });
-}
+require('./lib/ipc-git').register({ ipcMain, app, safeStorage, addRecent: (...a) => addRecent(...a) });
 
-const { isSafeName, isSafeGitRef, isSafeExternalUrl } = require('./lib/validate');
-
-async function getGitRoot(startPath) {
-  const res = await runGit(['rev-parse', '--show-toplevel'], startPath);
-  if (!res.ok) return null;
-  return res.stdout.trim().replace(/\//g, path.sep);
-}
-
-// ---------- Recent projects store (simple JSON file, no extra deps) ----------
-const recentFilePath = () => path.join(app.getPath('userData'), 'recent-projects.json');
-
-function readRecent() {
-  try {
-    const raw = fs.readFileSync(recentFilePath(), 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-function writeRecent(list) {
-  try {
-    fs.writeFileSync(recentFilePath(), JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write recent projects:', err);
-  }
-}
-
-function addRecent(folderPath) {
-  scope.addRoot(folderPath);
-  let list = readRecent().filter((p) => p !== folderPath);
-  list.unshift(folderPath);
-  list = list.slice(0, 10);
-  writeRecent(list);
-  return list;
-}
-
-const recentFilesPath = () => path.join(app.getPath('userData'), 'recent-files.json');
-
-function readRecentFiles() {
-  try {
-    return JSON.parse(fs.readFileSync(recentFilesPath(), 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function writeRecentFiles(list) {
-  try {
-    fs.writeFileSync(recentFilesPath(), JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write recent files:', err);
-  }
-}
-
-function addRecentFile(filePath, projectRoot) {
-  let list = readRecentFiles().filter((f) => f.path !== filePath);
-  list.unshift({ path: filePath, projectRoot: projectRoot || null, openedAt: Date.now() });
-  list = list.slice(0, 40);
-  writeRecentFiles(list);
-}
-
-ipcMain.handle('recent-files:get', () => readRecentFiles());
-ipcMain.handle('recent-files:add', (evt, filePath, projectRoot) => { addRecentFile(filePath, projectRoot); return { ok: true }; });
-
-// ---------- Preferences store (all user settings) ----------
-// ---------- Preferences store (simple JSON file) ----------
-// Schema defaults + sanitization live in lib/prefs.js (kept dependency-free
-// from Electron so the validation rules are unit-testable).
-const { DEFAULT_PREFS, sanitizePrefsPartial } = require('./lib/prefs');
-const prefsFilePath = () => path.join(app.getPath('userData'), 'prefs.json');
-function readPrefs() {
-  try {
-    const saved = JSON.parse(fs.readFileSync(prefsFilePath(), 'utf-8'));
-    return { ...DEFAULT_PREFS, ...saved, customTheme: { ...DEFAULT_PREFS.customTheme, ...(saved.customTheme || {}) } };
-  } catch {
-    return { ...DEFAULT_PREFS };
-  }
-}
-function writePrefs(prefs) {
-  try {
-    fs.writeFileSync(prefsFilePath(), JSON.stringify(prefs, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write prefs:', err);
-  }
-}
-
-ipcMain.handle('prefs:get', () => readPrefs());
-ipcMain.handle('prefs:set', (evt, partial) => {
-  const clean = sanitizePrefsPartial(partial || {});
-  const merged = { ...readPrefs(), ...clean };
-  writePrefs(merged);
-  if (clean.discordRpcEnabled !== undefined || clean.discordClientId !== undefined) {
-    reconnectDiscordRpc();
-  }
-  return merged;
-});
-
-// ---------- Session store (crash recovery) ----------
-// Keyed by project root path, so each project remembers its own last set of
-// open tabs. Written proactively on every tab change (not just on clean
-// shutdown) specifically so a crash or force-close still leaves a usable
-// snapshot on disk to restore from next time that project opens.
-const sessionsFilePath = () => path.join(app.getPath('userData'), 'sessions.json');
-function readSessions() {
-  try {
-    return JSON.parse(fs.readFileSync(sessionsFilePath(), 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-function writeSessions(sessions) {
-  try {
-    fs.writeFileSync(sessionsFilePath(), JSON.stringify(sessions, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to write sessions:', err);
-  }
-}
-
-ipcMain.handle('session:save', (evt, projectRoot, data) => {
-  if (!projectRoot) return { ok: false };
-  const sessions = readSessions();
-  if (!data || !data.openTabs || !data.openTabs.length) {
-    delete sessions[projectRoot]; // nothing open — don't keep a stale entry around
-  } else {
-    sessions[projectRoot] = {
-      openTabs: data.openTabs.slice(0, 50).map((t) => ({
-        path: String(t.path || '').slice(0, 1000),
-        pinned: !!t.pinned,
-        cursor: (t.cursor && Number.isFinite(t.cursor.line) && Number.isFinite(t.cursor.column))
-          ? { line: Math.max(1, Math.floor(t.cursor.line)), column: Math.max(1, Math.floor(t.cursor.column)) }
-          : null,
-      })),
-      activeTab: data.activeTab ? String(data.activeTab).slice(0, 1000) : null,
-      savedAt: Date.now(),
-    };
-  }
-  // Cap how many projects' sessions we remember, dropping the oldest.
-  const entries = Object.entries(sessions).sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0));
-  writeSessions(Object.fromEntries(entries.slice(0, 50)));
-  return { ok: true };
-});
-
-ipcMain.handle('session:load', (evt, projectRoot) => {
-  const sessions = readSessions();
-  return sessions[projectRoot] || null;
-});
+const { readRecent, writeRecent, addRecent, readPrefs } = require('./lib/stores').createStores({ app, ipcMain, scope, getDiscord: () => discord });
 
 // ---------- Discord Rich Presence ----------
 // Uses @xhayper/discord-rpc, a pure-JS client with no native build step —
@@ -301,118 +108,7 @@ ipcMain.handle('session:load', (evt, projectRoot) => {
 // supplies their own Discord Application Client ID in Settings (create one
 // free at https://discord.com/developers/applications — Rich Presence
 // can't work without an app ID registered there).
-let discordClient = null;
-let discordConnected = false;
-let discordReconnectTimer = null;
-let discordConnecting = false;
-const discordSessionStart = Math.floor(Date.now() / 1000);
-let lastDiscordActivity = { details: 'Idle', state: 'No project open' };
-
-function clearDiscordReconnectTimer() {
-  if (discordReconnectTimer) {
-    clearTimeout(discordReconnectTimer);
-    discordReconnectTimer = null;
-  }
-}
-
-function destroyDiscordClient() {
-  clearDiscordReconnectTimer();
-  discordConnecting = false;
-  discordConnected = false;
-  if (discordClient) {
-    const toDestroy = discordClient;
-    discordClient = null;
-    try { toDestroy.destroy().catch(() => {}); } catch { /* already gone */ }
-  }
-}
-
-function applyDiscordActivity() {
-  if (!discordConnected || !discordClient || !discordClient.user) return;
-  const { details, state } = lastDiscordActivity;
-  discordClient.user.setActivity({
-    details: String(details || 'Idle').slice(0, 128),
-    state: state ? String(state).slice(0, 128) : undefined,
-    startTimestamp: discordSessionStart,
-    largeImageKey: 'nexo_logo',
-    largeImageText: 'Nexo Dev',
-    instance: false,
-  }).then(() => {
-    console.log('[discord-rpc] activity sent:', details, '|', state);
-  }).catch((err) => console.error('[discord-rpc] setActivity failed:', err.message));
-}
-
-let discordHasWarnedDisconnected = false;
-
-function scheduleDiscordReconnect() {
-  clearDiscordReconnectTimer();
-  discordReconnectTimer = setTimeout(() => {
-    discordReconnectTimer = null;
-    connectDiscordRpc();
-  }, 15000); // Discord not running yet, or a transient drop — try again shortly.
-}
-
-function connectDiscordRpc() {
-  const prefs = readPrefs();
-  if (!prefs.discordRpcEnabled || !prefs.discordClientId) return;
-  if (discordClient || discordConnecting) return; // already connected or mid-attempt
-
-  discordConnecting = true;
-  const client = new DiscordRPCClient({ clientId: prefs.discordClientId });
-  discordClient = client;
-
-  client.on('ready', () => {
-    discordConnecting = false;
-    discordConnected = true;
-    discordHasWarnedDisconnected = false; // back up — allow one fresh warning if it drops again
-    // Confirms the IPC handshake actually completed and which account it
-    // authenticated as — useful for telling "connected but Discord is
-    // hiding it" apart from "never connected at all".
-    console.log('[discord-rpc] connected as', client.user?.username || '(unknown user)');
-    applyDiscordActivity();
-  });
-
-  client.on('disconnected', () => {
-    discordConnected = false;
-    if (discordClient === client) {
-      discordClient = null;
-      scheduleDiscordReconnect();
-    }
-  });
-
-  client.login().catch((err) => {
-    // Most common cause: Discord desktop isn't running (this needs the
-    // desktop app's local IPC socket — Discord in a browser tab can't
-    // provide that), or the client ID is wrong/not registered. Quiet retry
-    // rather than surfacing a dialog — this is a nice-to-have, not something
-    // that should interrupt coding. Log it once per outage, not every retry,
-    // so a long coding session without Discord open doesn't spam the console.
-    if (!discordHasWarnedDisconnected) {
-      console.error('[discord-rpc] connection failed:', err.message, '(will keep retrying quietly)');
-      discordHasWarnedDisconnected = true;
-    }
-    discordConnecting = false;
-    if (discordClient === client) {
-      discordClient = null;
-      scheduleDiscordReconnect();
-    }
-  });
-}
-
-function reconnectDiscordRpc() {
-  destroyDiscordClient();
-  discordHasWarnedDisconnected = false;
-  connectDiscordRpc();
-}
-
-function setDiscordActivity(details, state) {
-  lastDiscordActivity = { details: details || 'Idle', state: state || null };
-  applyDiscordActivity();
-}
-
-ipcMain.handle('discord:set-activity', (evt, details, state) => {
-  setDiscordActivity(details, state);
-  return { ok: true };
-});
+const discord = require('./lib/discord').createDiscord({ ipcMain, readPrefs });
 
 // ---------- Window ----------
 function createSplash() {
@@ -559,40 +255,7 @@ ipcMain.handle('app:toggle-devtools', () => { if (mainWindow) mainWindow.webCont
 ipcMain.handle('app:toggle-fullscreen', () => { if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen()); });
 ipcMain.handle('app:show-about', () => showAboutDialog());
 
-// ---------- Auto-update (GitHub Releases via electron-updater) ----------
-// Downloads only happen when the user explicitly agrees — never silently in
-// the background, since that could interrupt someone mid-work with a forced
-// restart later. The renderer drives the UI; this just relays events.
-autoUpdater.autoDownload = false;
-autoUpdater.autoInstallOnAppQuit = false;
-let manualUpdateCheck = false;
-
-function sendToRenderer(channel, ...args) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
-}
-autoUpdater.on('update-available', (info) => sendToRenderer('update:available', info.version));
-autoUpdater.on('update-not-available', () => {
-  if (manualUpdateCheck) sendToRenderer('update:not-available');
-  manualUpdateCheck = false;
-});
-autoUpdater.on('download-progress', (progress) => sendToRenderer('update:progress', progress.percent));
-autoUpdater.on('update-downloaded', () => sendToRenderer('update:downloaded'));
-autoUpdater.on('error', (err) => {
-  if (manualUpdateCheck) sendToRenderer('update:error', err.message);
-  manualUpdateCheck = false;
-});
-
-ipcMain.handle('update:check', (evt, manual) => {
-  if (!app.isPackaged) return { ok: false, error: 'Updates only run in the packaged app, not `npm start`.' };
-  manualUpdateCheck = !!manual;
-  autoUpdater.checkForUpdates().catch((err) => {
-    if (manualUpdateCheck) sendToRenderer('update:error', err.message);
-    manualUpdateCheck = false;
-  });
-  return { ok: true };
-});
-ipcMain.handle('update:download', () => { autoUpdater.downloadUpdate(); });
-ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall(); });
+const updater = require('./lib/updater').createUpdater({ ipcMain, app, getWindow: () => mainWindow });
 
 app.whenReady().then(() => {
   createSplash();
@@ -601,13 +264,9 @@ app.whenReady().then(() => {
   if (initialPath) { pendingOpenPath = initialPath; grantPath(initialPath); }
   for (const r of readRecent()) scope.addRoot(r);
 
-  // Check once, a bit after launch — not immediately, so it doesn't compete
-  // with everything else that's loading on startup.
-  if (app.isPackaged) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 8000);
-  }
+  updater.checkSoon();
 
-  connectDiscordRpc();
+  discord.connect();
 });
 
 app.on('window-all-closed', () => {
@@ -700,9 +359,25 @@ ipcMain.handle('pty:available', () => ({ available: ptyManager.available, error:
 ipcMain.handle('pty:spawn', (evt, opts = {}) => {
   try {
     const cwd = typeof opts.cwd === 'string' ? opts.cwd : undefined;
-    return { ok: true, ...ptyManager.spawn({ cwd, cols: opts.cols, rows: opts.rows, env: pythonEnvFor(cwd || process.cwd()), shell: readPrefs().customShell }) };
+    let command;
+    if (opts.remote) {
+      if (opts.remote.kind === 'devcontainer' && !scope.allows(opts.remote.folder)) return { ok: false, error: 'That folder is outside the open workspace.' };
+      command = require('./lib/remote').build(opts.remote);
+      const exe = require('./lib/lsp').findExecutable(command.file, null);
+      if (!exe) return { ok: false, error: `"${command.file}" was not found on PATH.` };
+      command = { ...command, file: exe };
+    }
+    return { ok: true, ...ptyManager.spawn({ cwd, cols: opts.cols, rows: opts.rows, env: pythonEnvFor(cwd || process.cwd()), shell: readPrefs().customShell, command }) };
   } catch (err) { return { ok: false, error: err.message }; }
 });
+ipcMain.handle('remote:ssh-hosts', () => {
+  try { return { ok: true, hosts: require('./lib/remote').parseSshHosts(fs.readFileSync(path.join(require('os').homedir(), '.ssh', 'config'), 'utf8')) }; } catch { return { ok: true, hosts: [] }; }
+});
+ipcMain.handle('remote:docker-list', () => new Promise((resolve) => {
+  const docker = require('./lib/lsp').findExecutable('docker', null);
+  if (!docker) return resolve({ ok: false, error: 'docker was not found on PATH.', names: [] });
+  execFile(docker, ['ps', '--format', '{{.Names}}'], { timeout: 8000, windowsHide: true }, (err, stdout) => resolve(err ? { ok: false, error: 'Could not list containers (is Docker running?).', names: [] } : { ok: true, names: require('./lib/remote').parseDockerNames(stdout) }));
+}));
 ipcMain.handle('pty:write', (evt, id, data) => ({ ok: ptyManager.write(id, data) }));
 ipcMain.handle('pty:resize', (evt, id, cols, rows) => { ptyManager.resize(id, cols, rows); return { ok: true }; });
 ipcMain.handle('pty:kill', (evt, id) => { ptyManager.kill(id); return { ok: true }; });
@@ -711,6 +386,7 @@ ipcMain.handle('pty:kill', (evt, id) => { ptyManager.kill(id); return { ok: true
 const { LspManager } = require('./lib/lsp');
 const lspManager = new LspManager({
   getUserServers: () => readPrefs().lspServers || {},
+  extraBinDirs: () => [require('./lib/lsp-install').binDir(lspInstallDir())],
   onMessage: (id, msg) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lsp:message', id, msg); },
   onExit: (id, code, error) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lsp:exit', id, code, error); },
 });
@@ -730,9 +406,16 @@ ipcMain.handle('ext:set-enabled', (evt, id, enabled) => {
 });
 ipcMain.handle('ext:open-folder', () => { fs.mkdirSync(extDir(), { recursive: true }); shell.openPath(extDir()); return { ok: true, dir: extDir() }; });
 ipcMain.handle('lsp:status', (evt, root) => {
-  const { installCommand } = require('./lib/lsp-servers');
+  const { installCommand, managedPackages } = require('./lib/lsp-servers');
   if (typeof root !== 'string') return { ok: false };
-  return { ok: true, rows: lspManager.statusAll(root).map((r) => ({ ...r, installCmd: installCommand(r) })) };
+  return { ok: true, rows: lspManager.statusAll(root).map((r) => ({ ...r, installCmd: installCommand(r), canInstall: !!managedPackages(r), installId: r.candidates && r.candidates[0] ? r.candidates[0].id : null })) };
+});
+const lspInstallDir = () => path.join(app.getPath('userData'), 'lsp-servers');
+ipcMain.handle('lsp:install', (evt, id) => {
+  if (typeof id !== 'string') return { ok: false, error: 'Bad request.' };
+  fs.mkdirSync(lspInstallDir(), { recursive: true });
+  const { findExecutable } = require('./lib/lsp');
+  return require('./lib/lsp-install').install(id, { dir: lspInstallDir(), find: (c) => findExecutable(c, null), spawn });
 });
 ipcMain.handle('lsp:send', (evt, id, msg) => ({ ok: lspManager.send(id, msg) }));
 ipcMain.handle('lsp:stop', (evt, id) => { lspManager.stop(id); return { ok: true }; });
@@ -747,7 +430,7 @@ app.on('before-quit', () => {
   for (const watcher of fileWatchers.values()) {
     try { watcher.close(); } catch { /* already gone */ }
   }
-  destroyDiscordClient();
+  discord.destroy();
 });
 
 // ---------- IPC: dialogs ----------
@@ -800,25 +483,6 @@ ipcMain.handle('dialog:pick-file', async (evt, title, filters) => {
   return file;
 });
 
-ipcMain.handle('git:clone', async (evt, url, destParentDir) => {
-  if (typeof url !== 'string') return { ok: false, error: 'Invalid repository URL.' };
-  let name = (url.trim().replace(/[\/\\]+$/, '').split(/[\/:]/).pop() || 'repository').replace(/\.git$/i, '');
-  name = name.replace(/[<>:"|?*\\/]/g, '').trim();
-  if (!name || name === '.' || name === '..') name = 'repository';
-  let destDir = path.join(destParentDir, name);
-  let suffix = 1;
-  while (fs.existsSync(destDir)) {
-    destDir = path.join(destParentDir, `${name}-${suffix}`);
-    suffix++;
-  }
-  const trimmedUrl = url.trim();
-  if (!trimmedUrl || trimmedUrl.startsWith('-')) return { ok: false, error: 'Invalid repository URL.' };
-  const authArgs = /^https:\/\/(www\.)?github\.com\//i.test(trimmedUrl) ? githubAuthHeaderArgs(readGithubToken()) : [];
-  const res = await runGit([...authArgs, 'clone', '--', trimmedUrl, destDir], destParentDir, { authSensitive: true, timeoutMs: 300000 });
-  if (!res.ok) return { ok: false, error: res.stderr || res.stdout || 'Clone failed.' };
-  const recent = addRecent(destDir);
-  return { ok: true, path: destDir, recent };
-});
 
 ipcMain.handle('dialog:save-as', async (evt, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, { defaultPath: defaultName });
@@ -1092,247 +756,6 @@ ipcMain.handle('fs:list-files', async (evt, rootPath) => {
   return { files: out, truncated: out.length >= QUICK_OPEN_MAX_FILES };
 });
 
-// ---------- IPC: git ----------
-// ---------- GitHub API integration ----------
-// The token is encrypted at rest with the OS keychain (safeStorage) rather
-// than living in plain text in prefs.json — it's a real credential, not a
-// UI preference.
-function githubTokenPath() { return path.join(app.getPath('userData'), 'github-token.enc'); }
-
-function saveGithubToken(token) {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('OS-level credential encryption is unavailable on this system, so the token cannot be stored securely.');
-  }
-  fs.writeFileSync(githubTokenPath(), safeStorage.encryptString(token));
-}
-
-function readGithubToken() {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) return null;
-    const enc = fs.readFileSync(githubTokenPath());
-    return safeStorage.decryptString(enc);
-  } catch {
-    return null;
-  }
-}
-
-function clearGithubToken() {
-  try { fs.unlinkSync(githubTokenPath()); } catch { /* already gone */ }
-}
-
-function githubApiRequest(method, urlPath, body, tokenOverride) {
-  return new Promise((resolve) => {
-    const token = tokenOverride || readGithubToken();
-    if (!token) { resolve({ ok: false, status: 0, error: 'No GitHub token saved. Add one in Settings.' }); return; }
-    const data = body ? JSON.stringify(body) : null;
-    const req = https.request({
-      hostname: 'api.github.com',
-      path: urlPath,
-      method,
-      headers: {
-        'User-Agent': 'Nexo-Dev',
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}),
-      },
-      timeout: 15000,
-    }, (res) => {
-      let raw = '';
-      res.on('data', (c) => { raw += c; });
-      res.on('end', () => {
-        let json = null;
-        try { json = raw ? JSON.parse(raw) : null; } catch { /* non-JSON body */ }
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve({ ok: true, status: res.statusCode, data: json });
-        else resolve({ ok: false, status: res.statusCode, error: (json && json.message) || `GitHub API error ${res.statusCode}` });
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('Request to GitHub timed out.')));
-    req.on('error', (err) => resolve({ ok: false, status: 0, error: err.message }));
-    if (data) req.write(data);
-    req.end();
-  });
-}
-
-// Only inject the token for github.com HTTPS remotes — never for SSH remotes
-// (which use your existing SSH keys) or other hosts (self-hosted GitLab,
-// Bitbucket, etc.) where this PAT has no business being sent.
-function githubAuthHeaderArgs(token) {
-  if (!token) return [];
-  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
-  // Scoped via -c to this single invocation — never written to .git/config,
-  // never appears in `git remote -v`, and doesn't touch the stored remote URL.
-  return ['-c', `http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`];
-}
-
-async function githubAuthArgsForRemote(root) {
-  const token = readGithubToken();
-  if (!token) return [];
-  const remoteRes = await runGit(['remote', 'get-url', 'origin'], root);
-  if (!remoteRes.ok || !/^https:\/\/(www\.)?github\.com\//i.test(remoteRes.stdout.trim())) return [];
-  // git's extraHeader config is multi-valued — if this repo already has a
-  // leftover http.extraheader entry from something else (an old manual PAT
-  // setup, GitHub Desktop, gh CLI, whatever), our own -c-scoped header below
-  // gets sent ALONGSIDE it rather than replacing it, so the request ends up
-  // with two Authorization headers and GitHub can reject or misbehave on
-  // that. Clearing any existing entry first (silently — it's fine if there
-  // isn't one) keeps this repo's git config from fighting with our own auth.
-  await runGit(['config', '--unset-all', 'http.https://github.com/.extraheader'], root);
-  return githubAuthHeaderArgs(token);
-}
-
-async function getGithubOwnerRepo(root) {
-  const res = await runGit(['remote', 'get-url', 'origin'], root);
-  if (!res.ok) return null;
-  return parseGithubOwnerRepo(res.stdout);
-}
-
-ipcMain.handle('github:set-token', async (evt, token) => {
-  const trimmed = (token || '').trim();
-  if (!trimmed) return { ok: false, error: 'Token cannot be empty.' };
-  const res = await githubApiRequest('GET', '/user', null, trimmed);
-  if (!res.ok) return { ok: false, error: res.status === 401 ? 'That token was rejected by GitHub — check it was copied correctly and has not expired.' : res.error };
-  try {
-    saveGithubToken(trimmed);
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-  return { ok: true, user: { login: res.data.login, avatar: res.data.avatar_url, name: res.data.name } };
-});
-
-ipcMain.handle('github:get-user', async () => {
-  if (!readGithubToken()) return { ok: false, error: 'No token saved.' };
-  const res = await githubApiRequest('GET', '/user');
-  if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, user: { login: res.data.login, avatar: res.data.avatar_url, name: res.data.name } };
-});
-
-ipcMain.handle('github:clear-token', () => { clearGithubToken(); return { ok: true }; });
-ipcMain.handle('github:has-token', () => ({ hasToken: !!readGithubToken() }));
-
-ipcMain.handle('github:list-releases', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const or = await getGithubOwnerRepo(root);
-  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
-  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/releases?per_page=50`);
-  if (!res.ok) return { ok: false, error: res.error };
-  return {
-    ok: true,
-    releases: res.data.map((r) => ({
-      id: r.id, tagName: r.tag_name, name: r.name || r.tag_name, body: r.body || '',
-      draft: r.draft, prerelease: r.prerelease, url: r.html_url, publishedAt: r.published_at || r.created_at,
-    })),
-  };
-});
-
-ipcMain.handle('github:create-release', async (evt, projectRoot, opts) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const or = await getGithubOwnerRepo(root);
-  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
-  if (!opts || !opts.tagName || !opts.tagName.trim()) return { ok: false, error: 'Tag name is required.' };
-  const body = {
-    tag_name: opts.tagName.trim(),
-    name: (opts.name || opts.tagName).trim(),
-    body: opts.body || '',
-    draft: !!opts.draft,
-    prerelease: !!opts.prerelease,
-  };
-  // If the tag doesn't exist yet, GitHub creates it automatically pointed at
-  // this commitish — same behavior as typing a new tag in the web UI.
-  if (opts.targetCommitish) body.target_commitish = opts.targetCommitish;
-  const res = await githubApiRequest('POST', `/repos/${or.owner}/${or.repo}/releases`, body);
-  if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, release: { url: res.data.html_url, tagName: res.data.tag_name } };
-});
-
-// Encrypts a value for a GitHub Actions secret using libsodium's sealed-box
-// scheme against the repo's public key — this is GitHub's documented
-// requirement for the Actions secrets API (crypto_box_seal), not a arbitrary
-// choice. The plaintext secret is never sent to GitHub or written to disk —
-// only the sealed ciphertext leaves this function.
-async function encryptSecretForGithub(publicKeyBase64, secretValue) {
-  await sodium.ready;
-  const keyBytes = sodium.from_base64(publicKeyBase64, sodium.base64_variants.ORIGINAL);
-  const messageBytes = sodium.from_string(secretValue);
-  const sealedBytes = sodium.crypto_box_seal(messageBytes, keyBytes);
-  return sodium.to_base64(sealedBytes, sodium.base64_variants.ORIGINAL);
-}
-
-ipcMain.handle('github:set-secret', async (evt, projectRoot, secretName, secretValue) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const or = await getGithubOwnerRepo(root);
-  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
-  const keyRes = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/actions/secrets/public-key`);
-  if (!keyRes.ok) return { ok: false, error: keyRes.error };
-  let encrypted;
-  try {
-    encrypted = await encryptSecretForGithub(keyRes.data.key, secretValue);
-  } catch (err) {
-    return { ok: false, error: `Could not encrypt secret: ${err.message}` };
-  }
-  const putRes = await githubApiRequest('PUT', `/repos/${or.owner}/${or.repo}/actions/secrets/${encodeURIComponent(secretName)}`, {
-    encrypted_value: encrypted,
-    key_id: keyRes.data.key_id,
-  });
-  if (!putRes.ok) return { ok: false, error: putRes.error };
-  return { ok: true };
-});
-
-ipcMain.handle('github:list-repos', async () => {
-  const res = await githubApiRequest('GET', '/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member');
-  if (!res.ok) return { ok: false, error: res.error };
-  return {
-    ok: true,
-    repos: res.data.map((r) => ({
-      fullName: r.full_name, cloneUrl: r.clone_url, private: r.private,
-      description: r.description, updatedAt: r.updated_at,
-    })),
-  };
-});
-
-ipcMain.handle('github:create-repo', async (evt, { name, description, isPrivate }) => {
-  if (!name || !name.trim()) return { ok: false, error: 'Repository name is required.' };
-  const res = await githubApiRequest('POST', '/user/repos', { name: name.trim(), description: description || '', private: !!isPrivate });
-  if (!res.ok) return { ok: false, error: res.error };
-  return { ok: true, repo: { fullName: res.data.full_name, cloneUrl: res.data.clone_url, htmlUrl: res.data.html_url } };
-});
-
-ipcMain.handle('github:list-pulls', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const or = await getGithubOwnerRepo(root);
-  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
-  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/pulls?state=open&per_page=50`);
-  if (!res.ok) return { ok: false, error: res.error };
-  return {
-    ok: true,
-    pulls: res.data.map((p) => ({
-      number: p.number, title: p.title, author: p.user.login, url: p.html_url,
-      draft: p.draft, branch: p.head.ref, updatedAt: p.updated_at,
-    })),
-  };
-});
-
-ipcMain.handle('github:list-issues', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const or = await getGithubOwnerRepo(root);
-  if (!or) return { ok: false, error: 'The origin remote is not a GitHub URL.' };
-  const res = await githubApiRequest('GET', `/repos/${or.owner}/${or.repo}/issues?state=open&per_page=50`);
-  if (!res.ok) return { ok: false, error: res.error };
-  return {
-    ok: true,
-    // The issues endpoint also returns PRs — filter those out, they're covered by list-pulls.
-    issues: res.data.filter((i) => !i.pull_request).map((i) => ({
-      number: i.number, title: i.title, author: i.user.login, url: i.html_url,
-      updatedAt: i.updated_at, labels: (i.labels || []).map((l) => (typeof l === 'string' ? l : l.name)),
-    })),
-  };
-});
-
 function findLocalPrettierBin(root) {
   const bin = process.platform === 'win32' ? 'prettier.cmd' : 'prettier';
   const p = path.join(root, 'node_modules', '.bin', bin);
@@ -1410,184 +833,4 @@ ipcMain.handle('npm:outdated', async (evt, projectRoot, forceRefresh = false) =>
 });
 
 const pythonIpc = require('./lib/ipc-python').register({ ipcMain, getWindow: () => mainWindow, pythonEnvFor, findLocalEslintBin, OUTDATED_CACHE_TTL_MS });
-
-
-ipcMain.handle('git:status', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['status', '--porcelain'], root);
-  if (!res.ok) return { ok: false, error: res.stderr || 'git status failed.' };
-  const { staged, unstaged, conflicts } = parsePorcelainStatus(res.stdout);
-  const branchRes = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root);
-  return { ok: true, root, branch: branchRes.ok ? branchRes.stdout.trim() : '', staged, unstaged, conflicts };
-});
-
-// Parses `git blame --line-porcelain` output (see lib/git-parse.js for the
-// implementation and the note on why metadata is cached by hash).
-ipcMain.handle('git:blame', async (evt, projectRoot, filePath) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['blame', '--line-porcelain', '--', filePath], root, { timeoutMs: 15000 });
-  if (!res.ok) return { ok: false, error: res.stderr || 'git blame failed.' }; // e.g. untracked/new file — not an error worth surfacing
-  return { ok: true, lines: parseBlamePorcelain(res.stdout) };
-});
-
-ipcMain.handle('git:diff', async (evt, projectRoot, relPath, staged) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const args = staged ? ['diff', '--cached', '--', relPath] : ['diff', '--', relPath];
-  const res = await runGit(args, root);
-  if (!res.ok && res.stderr) return { ok: false, error: res.stderr };
-  let diff = res.stdout;
-  if (!diff && !staged) {
-    // likely an untracked file — show its full contents as an "all added" diff
-    const untrackedRes = await runGit(['diff', '--no-index', '--', '/dev/null', relPath], root);
-    diff = untrackedRes.stdout || '';
-  }
-  return { ok: true, diff };
-});
-
-ipcMain.handle('git:stage', async (evt, projectRoot, relPath) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['add', '--', relPath], root);
-  return { ok: res.ok, error: res.ok ? null : res.stderr };
-});
-
-ipcMain.handle('git:stage-all', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['add', '-A'], root);
-  return { ok: res.ok, error: res.ok ? null : res.stderr };
-});
-
-ipcMain.handle('git:unstage', async (evt, projectRoot, relPath) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['reset', '--', relPath], root);
-  return { ok: res.ok, error: res.ok ? null : res.stderr };
-});
-
-ipcMain.handle('git:unstage-all', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['reset'], root);
-  return { ok: res.ok, error: res.ok ? null : res.stderr };
-});
-
-ipcMain.handle('git:discard', async (evt, projectRoot, relPath) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['checkout', '--', relPath], root);
-  return { ok: res.ok, error: res.ok ? null : res.stderr };
-});
-
-ipcMain.handle('git:commit', async (evt, projectRoot, message) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  if (!message || !message.trim()) return { ok: false, error: 'Commit message cannot be empty.' };
-  const res = await runGit(['commit', '-m', message], root);
-  return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout) };
-});
-
-ipcMain.handle('git:branches', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const res = await runGit(['branch', '--list', '--format=%(HEAD)|%(refname:short)'], root);
-  if (!res.ok) return { ok: false, error: res.stderr };
-  const branches = res.stdout.split('\n').filter(Boolean).map((line) => {
-    const [head, name] = line.split('|');
-    return { name, current: head === '*' };
-  });
-  return { ok: true, branches };
-});
-
-ipcMain.handle('git:checkout-branch', async (evt, projectRoot, branchName) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  if (!isSafeGitRef(branchName)) return { ok: false, error: 'Invalid branch name.' };
-  const res = await runGit(['checkout', branchName, '--'], root);
-  return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout) };
-});
-
-ipcMain.handle('git:create-branch', async (evt, projectRoot, branchName) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  if (!isSafeGitRef(branchName)) return { ok: false, error: 'Invalid branch name.' };
-  const res = await runGit(['checkout', '-b', branchName], root);
-  return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout) };
-});
-
-ipcMain.handle('git:log', async (evt, projectRoot, limit = 50) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const format = '%H%x1f%h%x1f%an%x1f%ar%x1f%s';
-  const res = await runGit(['log', `-n${Math.max(1, Math.min(1000, parseInt(limit, 10) || 50))}`, `--pretty=format:${format}`], root);
-  if (!res.ok) return { ok: false, error: res.stderr || 'No commits yet.' };
-  const commits = res.stdout.split('\n').filter(Boolean).map((line) => {
-    const [hash, short, author, date, subject] = line.split('\x1f');
-    return { hash, short, author, date, subject };
-  });
-  return { ok: true, commits };
-});
-
-ipcMain.handle('git:ignored-paths', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, paths: [] };
-  // --directory collapses a wholly-ignored folder into one "name/" entry
-  // instead of listing every file inside it — exactly what the tree filter
-  // needs, and much cheaper than enumerating everything.
-  const res = await runGit(['ls-files', '--others', '--ignored', '--exclude-standard', '--directory'], root);
-  if (!res.ok) return { ok: false, paths: [] };
-  return { ok: true, root, paths: res.stdout.split('\n').filter(Boolean) };
-});
-
-ipcMain.handle('git:show-commit', async (evt, projectRoot, hash) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  if (!/^[0-9a-fA-F]{4,64}$/.test(String(hash))) return { ok: false, error: 'Invalid commit hash.' };
-  const res = await runGit(['show', hash, '--'], root);
-  if (!res.ok) return { ok: false, error: res.stderr || 'Could not load commit.' };
-  return { ok: true, diff: res.stdout };
-});
-
-ipcMain.handle('git:remote-status', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const upstream = await runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], root);
-  if (!upstream.ok) return { ok: true, hasUpstream: false };
-  const counts = await runGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], root);
-  if (!counts.ok) return { ok: true, hasUpstream: true, remote: upstream.stdout.trim(), ahead: 0, behind: 0 };
-  const [behind, ahead] = counts.stdout.trim().split(/\s+/).map((n) => parseInt(n, 10) || 0);
-  return { ok: true, hasUpstream: true, remote: upstream.stdout.trim(), ahead, behind };
-});
-
-ipcMain.handle('git:push', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const authArgs = await githubAuthArgsForRemote(root);
-  const upstream = await runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], root);
-  let res;
-  if (!upstream.ok) {
-    const branchRes = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root);
-    const branch = branchRes.stdout.trim();
-    res = await runGit([...authArgs, 'push', '--set-upstream', 'origin', branch], root, { authSensitive: true, timeoutMs: 30000 });
-  } else {
-    res = await runGit([...authArgs, 'push'], root, { authSensitive: true, timeoutMs: 30000 });
-  }
-  return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Push failed.') };
-});
-
-ipcMain.handle('git:pull', async (evt, projectRoot) => {
-  const root = await getGitRoot(projectRoot);
-  if (!root) return { ok: false, error: 'Not a git repository.' };
-  const authArgs = await githubAuthArgsForRemote(root);
-  // --no-rebase: always merge on divergent branches rather than letting git
-  // fall back to asking for a pull.rebase preference it may not have set —
-  // newer git refuses to guess and fails outright without this. Merge is the
-  // safer default for a GUI client (no history rewriting to reason about
-  // without a terminal open), and matches most other git GUIs' defaults.
-  const res = await runGit([...authArgs, 'pull', '--no-rebase'], root, { authSensitive: true, timeoutMs: 30000 });
-  return { ok: res.ok, error: res.ok ? null : (res.stderr || res.stdout || 'Pull failed.') };
-});
 

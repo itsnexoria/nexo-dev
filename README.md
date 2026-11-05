@@ -67,6 +67,11 @@ Views are switchable from the icon rail on the far left. Files, Search and Git s
 - **Database viewer/manager** — SQLite, Postgres and MySQL; read-only by default, opt in to writes.
 - **Live Server** — serve the project locally and open it in the browser.
 - **Multi-root workspaces** (`.nexo-workspace`), **extensions** (`docs/extensions.md`), rebindable **keyboard shortcuts**, a first-run **tour**, and **file compare**.
+- **Editor commands** (palette) — sort/reverse/dedupe/join/remove-empty lines, upper/lower/title/snake case, trim trailing whitespace, indentation conversion, fold/unfold all, toggle word wrap / minimap / whitespace / line numbers, insert timestamp, copy (relative) path, reveal in file manager.
+- **Theme preset sharing** — *Theme: Export Presets…* / *Import Presets…* write and read a validated JSON file.
+- **Language servers** — also Dockerfile, SQL, C#, Kotlin, Swift (plus Python, Go, Rust, C/C++, Java, PHP, Ruby, shell, YAML, Lua, JSON/CSS/HTML). *Language Servers: Show Status & Install Hints…* has an **Install** button that installs npm-based servers into a private folder under the app's user data (nothing is added to your project; lifecycle scripts are disabled).
+- **Emmet** (HTML/CSS/SCSS/Less completions), **bookmarks** (`Ctrl+Alt+B`, next/previous/clear), **fold presets** (levels 1–5, block comments, regions).
+- **Remote terminals** — *Remote: SSH Terminal…*, *Docker Container Terminal…*, *Dev Container Terminal* open a normal terminal tab running `ssh`, `docker exec -it` or `devcontainer exec`. Targets are validated and run without a shell. (This is terminal access only, not remote file editing.)
 - **Git extras** — hunk/line staging, stash, side-by-side diff, commit graph, file history.
 
 ### ⚙️ Settings

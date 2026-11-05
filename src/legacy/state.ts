@@ -52,9 +52,10 @@ const LANG_MAP = {
   java: 'java', c: 'c', h: 'c', cpp: 'cpp', cs: 'csharp',
   php: 'php', sh: 'shell', bash: 'shell', yml: 'yaml', yaml: 'yaml',
   xml: 'xml', sql: 'sql', txt: 'plaintext', env: 'plaintext',
+  lua: 'lua', kt: 'kotlin', kts: 'kotlin', swift: 'swift', dockerfile: 'dockerfile', graphql: 'graphql', gql: 'graphql', ps1: 'powershell',
 };
 
 function langFromName(name: string): string {
-  const ext = name.includes('.') ? (name.split('.').pop() || '').toLowerCase() : '';
+  const ext = name.includes('.') ? (name.split('.').pop() || '').toLowerCase() : (name.toLowerCase() === 'dockerfile' ? 'dockerfile' : '');
   return (LANG_MAP as Record<string, string>)[ext] || 'plaintext';
 }

@@ -129,6 +129,9 @@ interface NexoApi {
   onPtyData(cb?: any): any;
   onPtyExit(cb?: any): any;
   lspStart(lang?: any, root?: any): Promise<any>;
+  remoteSshHosts(): Promise<any>;
+  remoteDockerList(): Promise<any>;
+  lspInstall(id?: any): Promise<any>;
   lspStatus(root?: any): Promise<any>;
   extList(): Promise<any>;
   extSetEnabled(id?: any, on?: any): Promise<any>;

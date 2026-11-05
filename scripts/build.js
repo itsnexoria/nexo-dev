@@ -21,7 +21,8 @@ function build() {
   const dist = path.join(root, 'renderer', 'dist');
   fs.mkdirSync(dist, { recursive: true });
   fs.writeFileSync(path.join(dist, 'renderer.js'), out.join('\n'));
-  console.log(`[build] ${order.length} modules -> renderer/dist/renderer.js`);
+  esbuild.buildSync({ entryPoints: [path.join(root, 'src', 'vendor', 'emmet-entry.js')], bundle: true, format: 'iife', minify: true, target: 'chrome124', outfile: path.join(dist, 'emmet.js'), logLevel: 'error' });
+  console.log(`[build] ${order.length} modules -> renderer/dist/renderer.js (+ emmet.js)`);
 }
 build();
 if (watch) {

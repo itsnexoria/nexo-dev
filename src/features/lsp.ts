@@ -4,7 +4,7 @@
 // the editor keeps working with Monaco's built-in features.
 'use strict';
 (function () {
-  const LSP_LANGS = new Set(['python', 'go', 'rust', 'c', 'cpp', 'java', 'php', 'ruby', 'shell', 'yaml', 'typescript', 'javascript']);
+  const LSP_LANGS = new Set(['python', 'go', 'rust', 'c', 'cpp', 'java', 'php', 'ruby', 'shell', 'yaml', 'typescript', 'javascript', 'lua', 'dockerfile', 'sql', 'csharp', 'kotlin', 'swift']);
   const SERVER_KEY = { javascript: 'typescript' }; // JS and TS share one tsserver-backed process
   const clients = new Map();  // `${serverKey}|${root}` -> client
   const byId = new Map();     // process id -> client
@@ -435,7 +435,7 @@
     const host = document.getElementById('modal-overlay');
     const rows = (res.rows || []).map((r: any) => {
       const badge = r.state === 'found' ? '● installed' : r.state === 'available' ? '○ installed (opt-in)' : '✕ missing';
-      return `<tr><td>${escapeHtml(r.lang)}</td><td>${escapeHtml(r.name || r.command || '')}</td><td class="lsp-${r.state}">${badge}</td><td>${r.state === 'missing' && r.installCmd ? `<code>${escapeHtml(r.installCmd)}</code> <button class="git-section-action" data-cmd="${escapeHtml(r.installCmd)}">Run in terminal…</button>` : escapeHtml(r.path || '')}</td></tr>`;
+      return `<tr><td>${escapeHtml(r.lang)}</td><td>${escapeHtml(r.name || r.command || '')}</td><td class="lsp-${r.state}">${badge}</td><td>${r.state === 'missing' && r.installCmd ? `<code>${escapeHtml(r.installCmd)}</code> ${r.canInstall && r.installId ? `<button class="git-section-action" data-install="${escapeHtml(r.installId)}">Install</button> ` : ''}<button class="git-section-action" data-cmd="${escapeHtml(r.installCmd)}">Run in terminal…</button>` : escapeHtml(r.path || '')}</td></tr>`;
     }).join('');
     const box = document.createElement('div');
     box.id = 'lsp-status-dialog'; box.className = 'lsp-status-dialog';
@@ -443,6 +443,14 @@
     document.body.append(box);
     box.querySelector('#lsp-status-close')!.addEventListener('click', () => box.remove());
     box.addEventListener('click', (e) => { if (e.target === box) box.remove(); });
+    box.querySelectorAll('[data-install]').forEach((b: any) => b.addEventListener('click', async () => {
+      const id = b.dataset.install;
+      if (!confirm(`Install "${id}" into Nexo's private language-server folder (via npm)?`)) return;
+      b.disabled = true; b.textContent = 'Installing…';
+      const r = await window.nexo.lspInstall(id);
+      if (r.ok) { flashToast(`Installed ${id}. Reopen the file or restart language servers to use it.`); box.remove(); showServerStatus(); }
+      else { b.disabled = false; b.textContent = 'Install'; alert(`Install failed: ${r.error}${r.output ? '\n\n' + r.output : ''}`); }
+    }));
     box.querySelectorAll('[data-cmd]').forEach((b) => b.addEventListener('click', () => {
       const cmd = b.dataset.cmd;
       if (confirm(`Run this in the project terminal?\n\n${cmd}`)) { box.remove(); runCommandInTerminal(cmd); }

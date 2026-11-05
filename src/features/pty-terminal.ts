@@ -42,7 +42,7 @@
     term.onResize(({ cols: c, rows: r }: any) => { if (pane.id) window.nexo.ptyResize(pane.id, c, r); });
     requestAnimationFrame(async () => {
       const { cols, rows } = dims();
-      const res = await window.nexo.ptySpawn({ cwd: state.projectRoot || undefined, cols, rows });
+      const res = await window.nexo.ptySpawn({ cwd: state.projectRoot || undefined, cols, rows, remote: session.remote || undefined });
       if (!res.ok) { term.write(`\r\n\x1b[31m[terminal error] ${res.error}\x1b[0m\r\n`); pane.alive = false; return; }
       pane.id = res.id; panes.set(res.id, pane);
       if (pane.pendingWrites) { pane.pendingWrites.forEach((w: any) => window.nexo.ptyWrite(pane.id, w)); pane.pendingWrites = null; }
@@ -68,9 +68,11 @@
   const origAppend = termAppend;
   const origRun = runCommandInTerminal;
 
-  window.createTerminalSession = function () {
+  window.createTerminalSession = function (remote?: any) {
     const session: any = origCreate();
     session.kind = 'pty';
+    session.remote = remote || null;
+    if (remote && remote.label) session.title = remote.label;
     session.panes = [];
     session.outputEl.classList.add('pty-session');
     newPane(session);
