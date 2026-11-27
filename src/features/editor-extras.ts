@@ -31,9 +31,9 @@
   function toggle() {
     if (!ok()) return;
     const model = editor.getModel(), line = editor.getPosition().lineNumber, existing = idsAt(model, line);
-    if (existing.length) { model.deltaDecorations(existing, []); flashToast('Bookmark removed'); return; }
+    if (existing.length) { model.deltaDecorations(existing, []); flashToast('Bookmark removed'); persist(); return; }
     model.deltaDecorations([], [{ range: new monaco.Range(line, 1, line, 1), options: { isWholeLine: true, glyphMarginClassName: GLYPH, glyphMarginHoverMessage: { value: 'Bookmark' }, stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges } }]);
-    flashToast('Bookmark added');
+    flashToast('Bookmark added'); persist();
   }
   function jump(dir: 1 | -1) {
     if (!ok()) return;
@@ -48,8 +48,39 @@
     if (!ok()) return;
     const model = editor.getModel(), ids = model.getAllDecorations().filter((d: any) => d.options.glyphMarginClassName === GLYPH).map((d: any) => d.id);
     model.deltaDecorations(ids, []);
-    flashToast(ids.length ? `Cleared ${ids.length} bookmark(s)` : 'No bookmarks in this file');
+    flashToast(ids.length ? `Cleared ${ids.length} bookmark(s)` : 'No bookmarks in this file'); persist();
   }
+
+  // Persistence: per project, file -> lines. Restored lazily when a file's model becomes active.
+  const bm: any = { root: null as string | null, files: {} as Record<string, number[]>, applied: new WeakSet<any>(), timer: null as any };
+  const tabOf = (model: any) => state.openTabs.find((t: any) => t.model === model);
+  async function ensureLoaded() {
+    if (bm.root === state.projectRoot) return;
+    bm.root = state.projectRoot; bm.files = {};
+    if (bm.root) { try { bm.files = (await window.nexo.bookmarksLoad(bm.root)).files || {}; } catch { /* none */ } }
+  }
+  async function applyStored() {
+    const model = editor && editor.getModel(); if (!model) return;
+    await ensureLoaded();
+    const tab = tabOf(model); if (!tab || bm.applied.has(model)) return;
+    bm.applied.add(model);
+    const saved = bm.files[tab.path] || [];
+    const max = model.getLineCount();
+    for (const line of saved) if (line <= max && !idsAt(model, line).length) model.deltaDecorations([], [{ range: new monaco.Range(line, 1, line, 1), options: { isWholeLine: true, glyphMarginClassName: GLYPH, glyphMarginHoverMessage: { value: 'Bookmark' }, stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges } }]);
+  }
+  function persist() {
+    clearTimeout(bm.timer);
+    bm.timer = setTimeout(() => {
+      if (!bm.root) return;
+      for (const tab of state.openTabs) { if (tab.model && bm.applied.has(tab.model)) { const l = lines(tab.model); if (l.length) bm.files[tab.path] = l; else delete bm.files[tab.path]; } }
+      window.nexo.bookmarksSave(bm.root, bm.files);
+    }, 600);
+  }
+  whenMonaco().then(() => {
+    editor.onDidChangeModel(() => applyStored());
+    editor.onDidChangeModelContent(() => { if (editor.getModel() && bm.applied.has(editor.getModel())) persist(); });
+    applyStored();
+  });
 
   PALETTE_COMMANDS.push(
     { label: 'Bookmarks: Toggle at Line', run: toggle, shortcut: 'Ctrl+Alt+B' },

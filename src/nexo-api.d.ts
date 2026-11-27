@@ -175,6 +175,11 @@ interface NexoApi {
   gitStashShow(root?: any, i?: any): Promise<any>;
   gitGraph(root?: any, limit?: any): Promise<any>;
   gitFileHistory(root?: any, rel?: any): Promise<any>;
+  bookmarksLoad(root?: any): Promise<any>;
+  bookmarksSave(root?: any, files?: any): Promise<any>;
+  trustStatus(root?: any): Promise<any>;
+  trustGrant(root?: any): Promise<any>;
+  trustRevoke(root?: any): Promise<any>;
   onMenu(channel?: any, callback?: any): any;
   [extra: string]: any;
 }

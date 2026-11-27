@@ -19,7 +19,11 @@ self.onmessage = async (e) => {
   if (d.t === 'ret') { const p = __p[d.i]; delete __p[d.i]; if (p) d.err ? p.rej(new Error(d.err)) : p.res(d.v); }
   else if (d.t === 'run') { try { if (!__h[d.id]) throw new Error('command not registered'); await __h[d.id](); } catch (err) { __post({ t: 'error', msg: String(err && err.message || err) }); } }
 };
-for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importScripts', 'indexedDB', 'caches', 'Worker', 'SharedWorker', 'close', 'postMessage']) { try { Object.defineProperty(self, k, { value: undefined, configurable: false }); } catch {} }
+for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importScripts', 'indexedDB', 'caches', 'Worker', 'SharedWorker', 'close', 'postMessage', 'WebTransport', 'BroadcastChannel', 'navigator']) {
+  // Remove from the whole prototype chain too, so Object.getPrototypeOf(self).fetch cannot bring it back.
+  for (let o = self; o; o = Object.getPrototypeOf(o)) { try { if (Object.prototype.hasOwnProperty.call(o, k)) Object.defineProperty(o, k, { value: undefined, configurable: false, writable: false }); } catch {} }
+  try { Object.defineProperty(self, k, { value: undefined, configurable: false, writable: false }); } catch {}
+}
 `;
   const st: any = { exts: [], workers: new Map(), statusEls: new Map(), cmdEntries: new Map(), providers: [] };
 
@@ -29,6 +33,9 @@ for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importS
     for (let i = PALETTE_COMMANDS.length - 1; i >= 0; i--) if (PALETTE_COMMANDS[i].__ext === id) PALETTE_COMMANDS.splice(i, 1);
     st.providers = st.providers.filter((p: any) => { if (p.id === id) { p.d.dispose(); return false; } return true; });
   }
+  const has = (m: any, perm: string) => Array.isArray(m.permissions) && m.permissions.includes(perm);
+  // Never let extensions touch repository internals or project config that can later execute code.
+  const PROTECTED = /(^|[\\/])(\.git|\.nexo|\.vscode|\.husky|node_modules)([\\/]|$)/i;
   const inRoots = (p: any) => typeof p === 'string' && (state.roots && state.roots.length ? state.roots : [state.projectRoot]).filter(Boolean).some((r) => p === r || p.startsWith(r!.replace(/[\\/]+$/, '') + '/') || p.startsWith(r!.replace(/[\\/]+$/, '') + '\\'));
 
   function start(ext: any) {
@@ -67,10 +74,10 @@ for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importS
             el.textContent = String(a.text).slice(0, 80); el.title = a.tooltip || m.name; reply(true); break;
           }
           case 'roots': reply((state.roots && state.roots.length ? state.roots : [state.projectRoot]).filter(Boolean)); break;
-          case 'fs.read': { if (!inRoots(a.p)) throw new Error('path is outside the workspace'); const r = await window.nexo.readFile(a.p); if (!r.ok) throw new Error(r.error); reply(r.content); break; }
-          case 'fs.write': { if (!inRoots(a.p)) throw new Error('path is outside the workspace'); const r = await window.nexo.writeFile(a.p, String(a.c)); if (!r.ok) throw new Error(r.error); reply(true); break; }
-          case 'ed.get': reply(editor ? editor.getValue() : ''); break;
-          case 'ed.insert': { if (!editor) throw new Error('no editor'); const sel = editor.getSelection(); editor.executeEdits('ext:' + ext.id, [{ range: sel, text: String(a.t), forceMoveMarkers: true }]); reply(true); break; }
+          case 'fs.read': { if (!has(m, 'workspace.read')) throw new Error('permission "workspace.read" is not declared in the manifest'); if (!inRoots(a.p) || PROTECTED.test(a.p)) throw new Error('path is outside the workspace'); const r = await window.nexo.readFile(a.p); if (!r.ok) throw new Error(r.error); reply(r.content); break; }
+          case 'fs.write': { if (!has(m, 'workspace.write')) throw new Error('permission "workspace.write" is not declared in the manifest'); if (!inRoots(a.p) || PROTECTED.test(a.p) || /\.\.[\\/]/.test(a.p) || /[\\/]\.\.$/.test(a.p)) throw new Error('path is outside the workspace'); const r = await window.nexo.writeFile(a.p, String(a.c)); if (!r.ok) throw new Error(r.error); reply(true); break; }
+          case 'ed.get': if (!has(m, 'editor.read')) throw new Error('permission "editor.read" is not declared in the manifest'); reply(editor ? editor.getValue() : ''); break;
+          case 'ed.insert': { if (!has(m, 'editor.write')) throw new Error('permission "editor.write" is not declared in the manifest'); if (!editor) throw new Error('no editor'); const sel = editor.getSelection(); editor.executeEdits('ext:' + ext.id, [{ range: sel, text: String(a.t), forceMoveMarkers: true }]); reply(true); break; }
           default: throw new Error('unknown method ' + d.m);
         }
       } catch (err: any) { reply(null, String(err.message || err)); }
@@ -94,7 +101,7 @@ for (const k of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importS
     for (const e of exts) {
       const row = document.createElement('div'); row.className = 'ext-row'; row.dataset.id = e.id;
       const info = document.createElement('div'); const b = document.createElement('b'); b.textContent = e.manifest ? `${e.manifest.name} ${e.manifest.version}` : e.id; info.append(b);
-      const sub = document.createElement('div'); sub.className = 'db-note'; sub.textContent = e.error ? 'Error: ' + e.error : (e.manifest.description || ''); info.append(sub);
+      const sub = document.createElement('div'); sub.className = 'db-note'; sub.textContent = e.error ? 'Error: ' + e.error : ((e.manifest.description || '') + (e.manifest.permissions && e.manifest.permissions.length ? ' — permissions: ' + e.manifest.permissions.join(', ') : ' — no permissions')); info.append(sub);
       row.append(info);
       if (e.manifest) {
         const btn = document.createElement('button'); btn.className = 'tbtn'; btn.textContent = e.enabled ? 'Disable' : 'Enable';

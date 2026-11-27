@@ -126,6 +126,7 @@ async function openProject(folder: any, opts: any = {}) {
   pyState.info = null; pyState.selected = null;
   setTimeout(refreshPyStatus, 0);
   await applyProjectSettings(folder);
+  checkWorkspaceTrust(folder);
   document.getElementById('project-name')!.textContent = folder.split(/[\\/]/).pop();
   document.getElementById('sidebar-root-name')!.textContent = folder.split(/[\\/]/).pop().toUpperCase();
   document.getElementById('welcome')!.style.display = 'none';

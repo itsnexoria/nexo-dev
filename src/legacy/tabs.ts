@@ -24,6 +24,7 @@ async function openFile(filePath: any, opts: any = {}) {
         if (!opts.silent) alert(`Could not open file:\n${res.error}`);
         return false;
       }
+      if (res.encoding && res.encoding !== 'utf8' && !opts.silent) flashToast('Not valid UTF-8 — opened as Latin-1 and will be saved the same way.');
       const lang = langFromName(name);
       const isMarkdown = /\.(md|markdown)$/i.test(name);
       const model = monaco.editor.createModel(res.content, lang);

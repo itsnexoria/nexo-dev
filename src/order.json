@@ -1,5 +1,6 @@
 [
  "../lib/keys.js",
+ "../lib/tasks.js",
  "../lib/theme-presets.js",
  "../lib/emmet-suggest.js",
  "legacy/state.ts",
@@ -23,6 +24,8 @@
  "legacy/boot.ts",
  "features/tools.ts",
  "features/workspace.ts",
+ "features/trust.ts",
+ "features/tasks.ts",
  "features/pty-terminal.ts",
  "features/remote.ts",
  "features/lsp.ts",

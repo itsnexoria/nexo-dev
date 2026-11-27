@@ -5,7 +5,7 @@ const fs = require('fs'); const path = require('path');
 test('extension runs sandboxed: command, status item, fs scope, no network', async () => {
   const { app, page, userData } = await launch();
   const dir = path.join(userData, 'extensions', 'demo'); fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ id: 'demo', name: 'Demo', version: '1.0.0', main: 'main.js', commands: [{ id: 'go', title: 'Go' }] }));
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ id: 'demo', name: 'Demo', version: '1.0.0', main: 'main.js', permissions: ['workspace.read', 'workspace.write'], commands: [{ id: 'go', title: 'Go' }] }));
   fs.writeFileSync(path.join(dir, 'main.js'), `
 nexo.statusBar.set('DEMO-ON');
 nexo.commands.register('go', async () => {

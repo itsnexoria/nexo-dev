@@ -421,3 +421,11 @@ input:focus, textarea:focus, select:focus {
 #tour-card { position: fixed; right: 20px; bottom: 44px; z-index: 900; width: 320px; padding: 14px 16px; border-radius: var(--radius-l); background: var(--bg-1); border: 1px solid var(--border-strong); box-shadow: var(--shadow-2); animation: pop .18s var(--ease); }
 #tour-card p { margin: 6px 0 12px; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
 .tour-row { display: flex; justify-content: space-between; gap: 8px; }
+
+/* Tasks & Problems */
+#tasks-output { margin: 0; min-height: 200px; max-height: calc(100vh - 220px); overflow: auto; padding: 10px; font-family: var(--code-font); font-size: 12px; white-space: pre-wrap; background: var(--panel-bg, rgba(0,0,0,.2)); border-radius: var(--radius-s); }
+.problem-row { align-items: flex-start; }
+.problem-sev.sev-error { color: #ff5f56; }
+.problem-sev.sev-warning { color: #ffbd2e; }
+.problem-sev.sev-info { color: #5aa9ff; }
+#status-problems { margin-right: 10px; }

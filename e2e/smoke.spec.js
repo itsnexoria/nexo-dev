@@ -4,7 +4,7 @@ const { launch } = require('./helpers');
 test('app boots and shows welcome', async () => {
   const { app, page } = await launch();
   await expect(page.locator('#welcome')).toBeVisible();
-  await expect(page.locator('.rail-btn')).toHaveCount(12);
+  await expect(page.locator('.rail-btn')).toHaveCount(13);
   await app.close();
 });
 

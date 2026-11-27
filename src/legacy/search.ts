@@ -45,7 +45,7 @@ async function runSearch() {
     summary!.textContent = '';
     results!.innerHTML = '';
     const errBox = document.getElementById('search-regex-error');
-    errBox!.textContent = `Invalid regex: ${res.error}`;
+    errBox!.textContent = /timed out/i.test(res.error) ? res.error : `Invalid regex: ${res.error}`;
     errBox!.classList.remove('hidden');
     return;
   }
@@ -160,7 +160,8 @@ document.getElementById('btn-replace-all')!.addEventListener('click', async () =
 
   document.getElementById('search-summary')!.textContent =
     `Replaced ${res.totalReplacements} occurrence${res.totalReplacements === 1 ? '' : 's'} in ${res.filesChanged} file${res.filesChanged === 1 ? '' : 's'}` +
-    (res.errors.length ? ` (${res.errors.length} failed)` : '');
+    (res.errors.length ? ` (${res.errors.length} failed)` : '') +
+    (res.skipped ? ` — ${res.skipped} non-UTF-8 file${res.skipped === 1 ? '' : 's'} skipped` : '');
   document.getElementById('search-results')!.innerHTML = '';
 
   // Any changed files that happen to be open need their editor content

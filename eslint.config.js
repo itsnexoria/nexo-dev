@@ -1,6 +1,6 @@
 const globals = require('globals');
 module.exports = [
-  { ignores: ['node_modules/**', 'dist/**', 'renderer/dist/**', 'src/**', 'e2e/**', 'extensions-sample/**'] },
+  { ignores: ['node_modules/**', 'dist/**', 'renderer/dist/**', 'renderer/renderer.js', 'src/**', 'e2e/**', 'extensions-sample/**'] },
   {
     files: ['**/*.js'],
     languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs', globals: { ...globals.node, window: 'readonly', document: 'readonly' } },

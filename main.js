@@ -5,6 +5,10 @@ const { execFile, spawn } = require('child_process');
 const { Scope, installGuard } = require('./lib/scope');
 const workspaceLib = require('./lib/workspace');
 const { isSafeName, isSafeExternalUrl } = require('./lib/validate');
+const { TrustStore } = require('./lib/trust');
+const { writeFileAtomic } = require('./lib/atomic');
+const textio = require('./lib/textio');
+const secure = require('./lib/secure');
 
 // ---------- Filesystem scope + IPC guard ----------
 // The renderer may only touch folders the main process saw the user choose (see lib/scope.js).
@@ -16,11 +20,16 @@ function grantPath(p) {
     if (fs.statSync(p).isDirectory()) scope.addRoot(p); else scope.addRoot(path.dirname(p));
   } catch { /* nonexistent: nothing to grant */ }
 }
+const trust = new TrustStore(path.join(app.getPath('userData'), 'trusted-folders.json'), { trustAll: !!process.env.NEXO_E2E });
 installGuard(ipcMain, {
   scope,
+  trust,
   isTrustedSender: (evt) => !!mainWindow && !mainWindow.isDestroyed() && evt.sender === mainWindow.webContents
     && /^file:\/\//i.test(evt.senderFrame ? evt.senderFrame.url : ''),
 });
+ipcMain.handle('trust:status', (evt, root) => ({ ok: true, trusted: trust.isTrusted(root) }));
+ipcMain.handle('trust:grant', (evt, root) => { trust.add(root); return { ok: true }; });
+ipcMain.handle('trust:revoke', (evt, root) => { if (typeof root === 'string') trust.remove(root); return { ok: true }; });
 ipcMain.handle('scope:grant-drop', (evt, paths) => { (Array.isArray(paths) ? paths.slice(0, 50) : []).forEach(grantPath); return { ok: true }; });
 
 // Safety net: log anything that slips through try/catch instead of letting
@@ -38,9 +47,6 @@ function logCrash(kind, err) {
 }
 process.on('uncaughtException', (err) => { console.error('[uncaught exception]', err); logCrash('uncaughtException', err); });
 process.on('unhandledRejection', (err) => { console.error('[unhandled rejection]', err); logCrash('unhandledRejection', err); });
-process.on('unhandledRejection', (reason) => {
-  console.error('[unhandled rejection]', reason);
-});
 
 // Only one instance of the app should ever run — if a file/folder is opened
 // via "Open with Nexo Dev" while the app is already running, Windows just
@@ -92,9 +98,9 @@ const {
   QUICK_OPEN_MAX_FILES,
   buildReplaceRegExp,
   walkForSearch,
-  walkForReplace,
   walkForFileList,
 } = require('./lib/search');
+const { runJob: runSearchJob } = require('./lib/search-runner');
 
 require('./lib/ipc-git').register({ ipcMain, app, safeStorage, addRecent: (...a) => addRecent(...a) });
 
@@ -289,6 +295,7 @@ const runningProcs = new Map(); // id -> ChildProcess
 function pythonEnvFor(cwd) {
   const env = { ...process.env, PYTHONUNBUFFERED: '1' };
   try {
+    if (!trust.isTrusted(cwd)) return env; // Restricted Mode: don't put the project's venv first on PATH
     const dir = pythonIpc.resolveVenvDir(cwd);
     if (!dir) return env;
     const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'PATH';
@@ -359,6 +366,7 @@ ipcMain.handle('pty:available', () => ({ available: ptyManager.available, error:
 ipcMain.handle('pty:spawn', (evt, opts = {}) => {
   try {
     const cwd = typeof opts.cwd === 'string' ? opts.cwd : undefined;
+    if (cwd && !scope.allows(cwd)) return { ok: false, error: 'That folder is outside the open workspace.' };
     let command;
     if (opts.remote) {
       if (opts.remote.kind === 'devcontainer' && !scope.allows(opts.remote.folder)) return { ok: false, error: 'That folder is outside the open workspace.' };
@@ -402,7 +410,7 @@ ipcMain.handle('ext:list', () => { fs.mkdirSync(extDir(), { recursive: true }); 
 ipcMain.handle('ext:set-enabled', (evt, id, enabled) => {
   if (typeof id !== 'string' || !require('./lib/extensions').ID_RE.test(id)) return { ok: false };
   const set = new Set(readExtDisabled()); if (enabled) set.delete(id); else set.add(id);
-  fs.writeFileSync(extStatePath(), JSON.stringify({ disabled: [...set] })); return { ok: true };
+  writeFileAtomic(extStatePath(), JSON.stringify({ disabled: [...set] })); return { ok: true };
 });
 ipcMain.handle('ext:open-folder', () => { fs.mkdirSync(extDir(), { recursive: true }); shell.openPath(extDir()); return { ok: true, dir: extDir() }; });
 ipcMain.handle('lsp:status', (evt, root) => {
@@ -506,8 +514,10 @@ ipcMain.handle('recent:remove', (evt, folderPath) => {
 // ---------- IPC: filesystem ----------
 // Lazy directory listing — returns immediate children only.
 ipcMain.handle('fs:read-dir', async (evt, dirPath) => {
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  const IGNORE = new Set(['node_modules', '.git', '.DS_Store', 'dist', 'build']);
+  let entries;
+  try { entries = await fs.promises.readdir(dirPath, { withFileTypes: true }); } catch { return []; }
+  // Only things that are never useful in a tree; build output etc. is hidden via .gitignore (toggle in the Explorer).
+  const IGNORE = new Set(['node_modules', '.git', '.DS_Store']);
   return entries
     .filter((e) => !IGNORE.has(e.name))
     .map((e) => ({
@@ -521,13 +531,15 @@ ipcMain.handle('fs:read-dir', async (evt, dirPath) => {
     });
 });
 
+const fileEncodings = new Map(); // path -> 'latin1' for files that are not valid UTF-8 (saved back the same way)
 const MAX_READ_BYTES = 50 * 1024 * 1024;
 ipcMain.handle('fs:read-file', async (evt, filePath) => {
   try {
-    const size = fs.statSync(filePath).size;
+    const size = (await fs.promises.stat(filePath)).size;
     if (size > MAX_READ_BYTES) return { ok: false, code: 'ETOOBIG', error: `File is too large to open (${(size / 1048576).toFixed(1)} MB; limit ${MAX_READ_BYTES / 1048576} MB).` };
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return { ok: true, content };
+    const { text, encoding } = textio.decodeText(await fs.promises.readFile(filePath));
+    if (encoding === 'utf8') fileEncodings.delete(filePath); else fileEncodings.set(filePath, encoding);
+    return { ok: true, content: text, encoding };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -545,7 +557,10 @@ const SELF_WRITE_GUARD_MS = 1000;
 ipcMain.handle('fs:write-file', async (evt, filePath, content) => {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content, 'utf-8');
+    const enc = fileEncodings.get(filePath) || 'utf8';
+    const data = textio.encodeText(String(content), enc);
+    if (enc === 'latin1' && data.toString('utf-8') === content) fileEncodings.delete(filePath); // text now needs UTF-8
+    await fs.promises.writeFile(filePath, data);
     recentWrites.set(filePath, Date.now());
     return { ok: true };
   } catch (err) {
@@ -555,6 +570,7 @@ ipcMain.handle('fs:write-file', async (evt, filePath, content) => {
 
 ipcMain.handle('watch:start', (evt, filePath) => {
   if (fileWatchers.has(filePath)) return { ok: true };
+  if (fileWatchers.size >= 300) return { ok: false, error: 'Too many watched files.' };
   try {
     let debounceTimer = null;
     const watcher = fs.watch(filePath, () => {
@@ -686,7 +702,7 @@ const dbIpc = require('./lib/ipc-db').register({
   ipcMain, dialog, getWindow: () => mainWindow, scope,
   storePath: path.join(app.getPath('userData'), 'db-connections.json'),
   secrets: {
-    encrypt: (s) => { if (!safeStorage.isEncryptionAvailable()) throw new Error('OS keychain encryption is not available; cannot store a password.'); return safeStorage.encryptString(s).toString('base64'); },
+    encrypt: (s) => { if (!secure.usable(safeStorage)) throw new Error('OS keychain encryption is not available (no keyring found); cannot store a password securely.'); return safeStorage.encryptString(s).toString('base64'); },
     decrypt: (b) => safeStorage.decryptString(Buffer.from(b, 'base64')),
   },
 });
@@ -728,8 +744,9 @@ ipcMain.handle('search:text', async (evt, rootPath, query, opts = {}) => {
   if (opts.useRegex) {
     try { new RegExp(query); } catch (err) { return { matches: [], truncated: false, error: err.message }; }
   }
-  const results = { matches: [], matchedFiles: 0 };
-  await walkForSearch(rootPath, query, !!opts.caseSensitive, results, !!opts.useRegex);
+  const job = await runSearchJob({ kind: 'search', root: rootPath, query, opts: { caseSensitive: !!opts.caseSensitive, useRegex: !!opts.useRegex } }, { timeoutMs: 20000 });
+  if (!job.ok) return { matches: [], truncated: false, error: job.error };
+  const results = job.results;
   return {
     matches: results.matches,
     truncated: results.matchedFiles >= SEARCH_MAX_FILES_WITH_MATCHES || results.matches.length >= SEARCH_MAX_MATCHES,
@@ -738,16 +755,15 @@ ipcMain.handle('search:text', async (evt, rootPath, query, opts = {}) => {
 
 ipcMain.handle('search:replace-all', async (evt, rootPath, query, replacement, opts = {}) => {
   if (!query) return { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [] };
-  let re;
-  let safeReplacement;
   try {
-    ({ re, safeReplacement } = buildReplaceRegExp(query, replacement, opts));
+    buildReplaceRegExp(query, replacement, opts);
   } catch (err) {
     return { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [{ path: '', error: `Invalid regex: ${err.message}` }] };
   }
-  const results = { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [] };
-  await walkForReplace(rootPath, re, safeReplacement, results, (full) => recentWrites.set(full, Date.now()));
-  return results;
+  const job = await runSearchJob({ kind: 'replace', root: rootPath, query, replacement: String(replacement), opts: { caseSensitive: !!opts.caseSensitive, useRegex: !!opts.useRegex } },
+    { timeoutMs: 120000, onWritten: (full) => recentWrites.set(full, Date.now()) });
+  if (!job.ok) return { filesChanged: 0, totalReplacements: 0, changedPaths: [], errors: [{ path: '', error: job.error }] };
+  return job.results;
 });
 
 ipcMain.handle('fs:list-files', async (evt, rootPath) => {

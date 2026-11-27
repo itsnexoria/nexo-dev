@@ -221,6 +221,15 @@ contextBridge.exposeInMainWorld('nexo', {
   gitGraph: (root, limit) => ipcRenderer.invoke('git:graph', root, limit),
   gitFileHistory: (root, rel) => ipcRenderer.invoke('git:file-history', root, rel),
 
+  // bookmarks
+  bookmarksLoad: (root) => ipcRenderer.invoke('bookmarks:load', root),
+  bookmarksSave: (root, files) => ipcRenderer.invoke('bookmarks:save', root, files),
+
+  // workspace trust
+  trustStatus: (root) => ipcRenderer.invoke('trust:status', root),
+  trustGrant: (root) => ipcRenderer.invoke('trust:grant', root),
+  trustRevoke: (root) => ipcRenderer.invoke('trust:revoke', root),
+
   // menu events
   onMenu: (channel, callback) => {
     const valid = ['menu:open-folder', 'menu:new-file', 'menu:save', 'menu:save-as', 'menu:toggle-sidebar', 'menu:toggle-terminal', 'menu:toggle-split', 'menu:toggle-zen', 'menu:show-search', 'menu:show-git', 'menu:check-updates'];
