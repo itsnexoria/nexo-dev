@@ -33,7 +33,7 @@
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
     "electron": "^45.4.1",
-    "electron-builder": "^24.13.3",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "eslint": "^9.0.0",
     "globals": "^15.0.0",
